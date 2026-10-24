@@ -196,3 +196,33 @@ def test_attachment_requires_same_tenant_document(client, login):
         json={"document_id": "00000000-0000-0000-0000-000000000000"},
     )
     assert response.status_code == 404
+
+
+def test_service_request_scope_filters(client, login):
+    employee = login("employee@example.com")
+    employee2 = login("employee2@example.com")
+
+    created = client.post(
+        "/api/v1/service-requests",
+        headers={**employee2, "Idempotency-Key": "scope-own-1"},
+        json={
+            "catalog_item_id": _catalog_item(client, employee2),
+            "form_data": {"topic": "Scope filter"},
+            "subject": "Scope filter request",
+            "description": "Verify own scope excludes other requesters.",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    own = client.get("/api/v1/service-requests?scope=own", headers=employee)
+    assert own.status_code == 200
+    assert own.json()["items"] == []
+
+    own2 = client.get("/api/v1/service-requests?scope=own", headers=employee2)
+    assert own2.status_code == 200
+    assert [item["id"] for item in own2.json()["items"]] == [created.json()["id"]]
+
+    forbidden_queue = client.get(
+        "/api/v1/service-requests?scope=queue", headers=employee
+    )
+    assert forbidden_queue.status_code == 403

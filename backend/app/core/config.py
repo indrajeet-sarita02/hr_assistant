@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     default_page_size: int = 20
     max_question_chars: int = 2000
 
+    # Operational metrics are disabled in production unless explicitly enabled.
+    metrics_enabled: bool = False
+
     document_max_size_mb: int = 10
     document_allowed_mime_types: str = (
         "application/pdf,image/jpeg,image/png,text/plain,"

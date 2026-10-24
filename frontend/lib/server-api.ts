@@ -6,24 +6,23 @@ const baseUrl = (process.env.BACKEND_API_URL || "http://127.0.0.1:8000").replace
 );
 
 export async function serverGet<T>(path: string): Promise<T | null> {
-  try {
-    const response = await fetch(`${baseUrl}/api/v1${path}`, {
-      headers: { Accept: "application/json" },
-      cache: "no-store",
-    });
-    if (!response.ok) return null;
-    return (await response.json()) as T;
-  } catch {
-    return null;
+  const response = await fetch(`${baseUrl}/api/v1${path}`, {
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(`Backend request failed with status ${response.status}.`);
   }
+  return (await response.json()) as T;
 }
 
-export async function serverGetPage<T>(
-  path: string,
-  fallbackLimit = 20,
-): Promise<Page<T>> {
+export async function serverGetPage<T>(path: string): Promise<Page<T>> {
   const page = await serverGet<Page<T>>(path);
-  return page ?? { items: [], total: 0, limit: fallbackLimit, offset: 0 };
+  if (page === null) {
+    throw new Error("Paginated backend endpoint returned 404.");
+  }
+  return page;
 }
 
 export function withQuery(

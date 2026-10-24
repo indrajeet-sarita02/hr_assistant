@@ -25,8 +25,12 @@ export default function ServiceRequestsPage() {
   const { me } = useSession();
   const searchParams = useSearchParams();
   const [status, setStatus] = useState(searchParams.get("status") || "");
-  const [scope, setScope] = useState<"all" | "mine">(
-    searchParams.get("tab") === "mine" ? "mine" : "all",
+  const [scope, setScope] = useState<"all" | "queue" | "mine">(
+    searchParams.get("scope") === "queue"
+      ? "queue"
+      : searchParams.get("tab") === "mine"
+        ? "mine"
+        : "all",
   );
   const canQueue = hasPermission(me?.permissions, permissions.serviceReadQueue);
   const canCreate = hasPermission(me?.permissions, permissions.serviceCreate);
@@ -34,9 +38,15 @@ export default function ServiceRequestsPage() {
   const { data, loading, error, reload } = useAsync(
     () =>
       apiGet<Page<ServiceRequest>>(
-        `/service-requests?limit=100${status ? `&request_status=${encodeURIComponent(status)}` : ""}`,
+        `/service-requests?limit=100${
+          scope === "queue"
+            ? "&scope=queue"
+            : scope === "mine"
+              ? "&scope=own"
+              : ""
+        }${status ? `&request_status=${encodeURIComponent(status)}` : ""}`,
       ),
-    [status],
+    [scope, status],
   );
 
   const rows = useMemo(() => {
@@ -72,6 +82,14 @@ export default function ServiceRequestsPage() {
               onClick={() => setScope("all")}
             >
               {t("requests.all_requests")}
+            </button>
+            <button
+              type="button"
+              className={`segment${scope === "queue" ? " is-active" : ""}`}
+              aria-pressed={scope === "queue"}
+              onClick={() => setScope("queue")}
+            >
+              {t("requests.queue")}
             </button>
             <button
               type="button"

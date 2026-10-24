@@ -187,6 +187,33 @@ def create_template(
     )
 
 
+@router.get("/templates/{template_id}", response_model=TemplateOut)
+def get_template(
+    template_id: uuid.UUID,
+    db: DbSession,
+    principal: Principal = Depends(require_internal_permission("onboarding.template.manage")),
+) -> TemplateOut:
+    template = db.scalar(
+        select(OnboardingTemplate).where(
+            OnboardingTemplate.id == template_id,
+            OnboardingTemplate.tenant_id == principal.tenant_id,
+        )
+    )
+    if template is None:
+        raise not_found("onboarding template")
+    tasks = list(
+        db.scalars(
+            select(OnboardingTemplateTask)
+            .where(OnboardingTemplateTask.template_id == template.id)
+            .order_by(OnboardingTemplateTask.position)
+        )
+    )
+    return TemplateOut(
+        **TemplateOut.model_validate(template).model_dump(exclude={"tasks"}),
+        tasks=[TemplateTaskOut.model_validate(task) for task in tasks],
+    )
+
+
 @router.patch("/templates/{template_id}", response_model=TemplateOut)
 def update_template(
     template_id: uuid.UUID,

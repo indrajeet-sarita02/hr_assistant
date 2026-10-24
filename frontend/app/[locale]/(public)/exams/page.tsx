@@ -32,13 +32,11 @@ export default async function ExamsPage({
   const t = createTranslator(locale);
   const local = await serverGetPage<CareerContent>(
     withQuery("/career/content", { locale, limit: 100 }),
-    100,
   );
   const content =
     locale === "hi" && local.total === 0
       ? await serverGetPage<CareerContent>(
           withQuery("/career/content", { locale: "en", limit: 100 }),
-          100,
         )
       : local;
   const items = content.items.filter((item) => item.content_type === "exam");

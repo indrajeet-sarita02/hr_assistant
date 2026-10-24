@@ -163,14 +163,36 @@ def list_requests(
     limit: int = 20,
     offset: int = 0,
     request_status: str | None = None,
+    scope: str | None = None,
 ) -> Page[ServiceRequestOut]:
     if principal.membership is None:
         raise forbidden("Organization member access is required.")
+    if scope is not None and scope not in {"own", "queue"}:
+        raise AppError(
+            422, "validation_error", "errors.validation", "Invalid scope."
+        )
     limit = max(1, min(limit, 100))
     stmt = select(HRServiceRequest).where(
         HRServiceRequest.tenant_id == principal.tenant_id
     )
-    if "service_request.read_queue" not in principal.permissions:
+    if scope == "own":
+        stmt = stmt.where(
+            or_(
+                HRServiceRequest.requester_user_id == principal.user_id,
+                HRServiceRequest.assignee_user_id == principal.user_id,
+            )
+        )
+    elif scope == "queue":
+        if "service_request.read_queue" not in principal.permissions:
+            raise forbidden("Missing permission: service_request.read_queue.")
+        stmt = stmt.where(
+            or_(
+                HRServiceRequest.assignee_user_id == principal.user_id,
+                HRServiceRequest.assignee_user_id.is_(None),
+            ),
+            HRServiceRequest.status.notin_(["closed", "cancelled"]),
+        )
+    elif "service_request.read_queue" not in principal.permissions:
         if "service_request.read_own" not in principal.permissions:
             raise forbidden("Missing permission: service_request.read_own.")
         stmt = stmt.where(

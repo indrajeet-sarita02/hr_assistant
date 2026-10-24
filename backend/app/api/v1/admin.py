@@ -701,6 +701,18 @@ def content_reports(
     )
 
 
+@router.get("/content-reports/{report_id}", response_model=ContentReportAdminOut)
+def get_content_report(
+    report_id: uuid.UUID,
+    db: DbSession,
+    principal: Principal = Depends(require_internal_permission("content_report.triage")),
+) -> ContentReportAdminOut:
+    report = db.get(ContentReport, report_id)
+    if report is None:
+        raise not_found("content report")
+    return ContentReportAdminOut.model_validate(report)
+
+
 @router.patch("/content-reports/{report_id}", response_model=ContentReportAdminOut)
 def triage_content_report(
     report_id: uuid.UUID,

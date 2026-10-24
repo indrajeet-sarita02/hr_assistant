@@ -32,13 +32,11 @@ export default async function CoursesPage({
   const t = createTranslator(locale);
   const local = await serverGetPage<Course>(
     withQuery("/courses", { locale, limit: 100 }),
-    100,
   );
   const courses =
     locale === "hi" && local.total === 0
       ? await serverGetPage<Course>(
           withQuery("/courses", { locale: "en", limit: 100 }),
-          100,
         )
       : local;
 

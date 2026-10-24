@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
 import uuid
+from collections import Counter
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -33,6 +35,42 @@ configure_logging(settings.debug)
 logger = get_logger(__name__)
 
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+_metrics_lock = threading.Lock()
+_metrics_started_at = time.time()
+_metrics_requests: Counter[tuple[str, str, int]] = Counter()
+_metrics_total = 0
+
+
+def _metric_path(path: str) -> str:
+    """Bound metric cardinality by replacing identifiers with placeholders."""
+    normalized = _UUID_RE.sub("{id}", path)
+    return normalized if len(normalized) <= 120 else normalized[:120]
+
+
+def record_request_metric(method: str, path: str, status_code: int) -> None:
+    global _metrics_total
+    with _metrics_lock:
+        _metrics_total += 1
+        _metrics_requests[(method, _metric_path(path), status_code)] += 1
+
+
+def metrics_snapshot() -> dict:
+    with _metrics_lock:
+        total = _metrics_total
+        rows = [
+            {"method": method, "path": path, "status": status, "count": count}
+            for (method, path, status), count in sorted(_metrics_requests.items())
+        ]
+    return {
+        "uptime_seconds": round(time.time() - _metrics_started_at, 2),
+        "requests_total": total,
+        "requests": rows,
+    }
+
 
 
 @asynccontextmanager
@@ -90,6 +128,9 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                     "status_code": response.status_code,
                     "duration_ms": duration_ms,
                 },
+            )
+            record_request_metric(
+                request.method, request.url.path, response.status_code
             )
             return response
         finally:
@@ -163,3 +204,10 @@ def readyz() -> JSONResponse:
             ),
         )
     return JSONResponse(status_code=200, content={"status": "ready"})
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics() -> JSONResponse:
+    if settings.is_production and not settings.metrics_enabled:
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    return JSONResponse(status_code=200, content=metrics_snapshot())

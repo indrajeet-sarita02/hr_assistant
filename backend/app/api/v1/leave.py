@@ -263,16 +263,35 @@ def list_requests(
     limit: int = 20,
     offset: int = 0,
     request_status: str | None = None,
+    scope: str | None = None,
 ) -> Page[LeaveRequestOut]:
     if principal.membership is None:
         raise forbidden("Organization member access is required.")
+    if scope is not None and scope not in {"own", "approvals", "all"}:
+        raise AppError(
+            422, "validation_error", "errors.validation", "Invalid scope."
+        )
     limit = max(1, min(limit, 100))
     stmt = select(LeaveRequest).where(
         LeaveRequest.tenant_id == principal.tenant_id
     )
     can_scope = "leave.request.read_scope" in principal.permissions
-    if can_scope:
-        if "leave.request.decide" in principal.permissions:
+    can_decide = "leave.request.decide" in principal.permissions
+    if scope == "own":
+        employee = _employee_for_principal(db, principal)
+        stmt = stmt.where(LeaveRequest.employee_id == employee.id)
+    elif scope == "approvals":
+        if not can_decide:
+            raise forbidden("Missing permission: leave.request.decide.")
+        stmt = stmt.where(
+            LeaveRequest.current_approver_user_id == principal.user_id,
+            LeaveRequest.status.in_(["pending", "needs_clarification"]),
+        )
+    elif scope == "all":
+        if not can_scope:
+            raise forbidden("Missing permission: leave.request.read_scope.")
+    elif can_scope:
+        if can_decide:
             stmt = stmt.where(
                 or_(
                     LeaveRequest.current_approver_user_id == principal.user_id,

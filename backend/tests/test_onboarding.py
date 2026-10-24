@@ -239,3 +239,21 @@ def test_template_without_case_can_be_rewritten(client, login, db):
     assert updated.status_code == 200, updated.text
     assert updated.json()["tasks"][0]["required_evidence"] is True
     assert template is not None
+
+
+def test_template_detail_is_tenant_scoped(client, login):
+    hr = login("hr@example.com")
+    template = _template(client, hr)
+
+    detail = client.get(
+        f"/api/v1/onboarding/templates/{template['id']}", headers=hr
+    )
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["id"] == template["id"]
+    assert detail.json()["tasks"]
+
+    missing = client.get(
+        "/api/v1/onboarding/templates/00000000-0000-0000-0000-000000000000",
+        headers=hr,
+    )
+    assert missing.status_code == 404

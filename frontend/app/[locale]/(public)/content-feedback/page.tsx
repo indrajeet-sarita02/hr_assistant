@@ -36,10 +36,9 @@ export default async function ContentFeedbackPage({
   const [contentPage, coursePage, testPage] = await Promise.all([
     serverGetPage<CareerContent>(
       withQuery("/career/content", { locale, limit: 100 }),
-      100,
     ),
-    serverGetPage<Course>(withQuery("/courses", { locale, limit: 100 }), 100),
-    serverGetPage<MockTest>(withQuery("/mock-tests", { locale, limit: 100 }), 100),
+    serverGetPage<Course>(withQuery("/courses", { locale, limit: 100 })),
+    serverGetPage<MockTest>(withQuery("/mock-tests", { locale, limit: 100 })),
   ]);
 
   const options: ContentFeedbackOption[] = [

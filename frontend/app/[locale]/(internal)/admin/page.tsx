@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   BookOpen,
   Check,
@@ -66,7 +67,20 @@ export default function AdminPage() {
   const canLeaveTypes = hasPermission(perms, permissions.leaveTypeManage);
   const canRetention = hasPermission(perms, permissions.retentionManage);
   const canLegalHold = hasPermission(perms, permissions.legalHoldManage);
-  const [tab, setTab] = useState<Tab>("overview");
+  const searchParams = useSearchParams();
+  const requestedTab = searchParams.get("tab");
+  const [tab, setTab] = useState<Tab>(() => {
+    const allowed: Tab[] = [
+      "overview",
+      "members",
+      "policy",
+      "settings",
+      "retention",
+    ];
+    return requestedTab && allowed.includes(requestedTab as Tab)
+      ? (requestedTab as Tab)
+      : "overview";
+  });
   const [working, setWorking] = useState<string | null>(null);
   const [actionError, setActionError] = useState<unknown>(null);
 
@@ -150,6 +164,10 @@ export default function AdminPage() {
       list.push({ key: "retention", label: t("admin.retention"), icon: Trash2 });
     return list;
   }, [canMembers, canRetention, canSettings, canWorkflow, canLeaveTypes, t]);
+
+  const activeTab: Tab = tabs.some((item) => item.key === tab)
+    ? tab
+    : "overview";
 
   const roles = data?.roles ?? [];
   const settings = data?.settings;
@@ -411,8 +429,8 @@ export default function AdminPage() {
               key={item.key}
               type="button"
               role="tab"
-              aria-selected={tab === item.key}
-              className={`admin-tab${tab === item.key ? " is-active" : ""}`}
+              aria-selected={activeTab === item.key}
+              className={`admin-tab${activeTab === item.key ? " is-active" : ""}`}
               onClick={() => setTab(item.key)}
             >
               <Icon size={15} aria-hidden="true" />
@@ -430,7 +448,7 @@ export default function AdminPage() {
         </div>
       )}
 
-      {tab === "overview" && (
+      {activeTab === "overview" && (
         <div className="stack">
           <div className="grid grid-3">
             <article className="card card-pad">
@@ -546,7 +564,7 @@ export default function AdminPage() {
         </div>
       )}
 
-      {tab === "members" && canMembers && (
+      {activeTab === "members" && canMembers && (
         <section className="card">
           <div className="card-header">
             <div>
@@ -656,7 +674,7 @@ export default function AdminPage() {
         </section>
       )}
 
-      {tab === "policy" && (canWorkflow || canLeaveTypes) && (
+      {activeTab === "policy" && (canWorkflow || canLeaveTypes) && (
         <div className="stack">
           {canLeaveTypes && (
             <section className="card">
@@ -832,7 +850,7 @@ export default function AdminPage() {
         </div>
       )}
 
-      {tab === "settings" && canSettings && settings && (
+      {activeTab === "settings" && canSettings && settings && (
         <section className="card">
           <div className="card-header">
             <div>
@@ -890,7 +908,7 @@ export default function AdminPage() {
         </section>
       )}
 
-      {tab === "retention" && canRetention && (
+      {activeTab === "retention" && canRetention && (
         <div className="stack">
           <section className="card">
             <div className="card-header">

@@ -158,3 +158,20 @@ def test_invalid_course_url_is_rejected_and_valid_course_is_public(client, login
         f"/api/v1/admin/courses/{expired.json()['id']}/publish", headers=reviewer
     )
     assert cannot_publish.status_code == 422
+
+
+def test_content_report_detail_requires_triage_permission(client, login):
+    reviewer = login("reviewer@example.com")
+    employee = login("employee@example.com")
+
+    missing = client.get(
+        "/api/v1/admin/content-reports/00000000-0000-0000-0000-000000000000",
+        headers=reviewer,
+    )
+    assert missing.status_code == 404
+
+    forbidden = client.get(
+        "/api/v1/admin/content-reports/00000000-0000-0000-0000-000000000000",
+        headers=employee,
+    )
+    assert forbidden.status_code == 403

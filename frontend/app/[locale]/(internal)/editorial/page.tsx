@@ -2,6 +2,7 @@
 
 import { FormEvent, useMemo, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
   Archive,
   Check,
@@ -52,7 +53,11 @@ export default function EditorialPage() {
   const canTriage = hasPermission(perms, permissions.contentReportTriage);
   const canContent = canEdit || canReview || canPublish;
 
-  const [tab, setTab] = useState<"content" | "reports">("content");
+  const searchParams = useSearchParams();
+  const requestedTab = searchParams.get("tab");
+  const [tab, setTab] = useState<"content" | "reports">(
+    requestedTab === "reports" ? "reports" : "content",
+  );
   const [status, setStatus] = useState("");
   const [working, setWorking] = useState<string | null>(null);
   const [actionError, setActionError] = useState<unknown>(null);

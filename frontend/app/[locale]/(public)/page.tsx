@@ -76,10 +76,9 @@ export default async function CareerHomePage({
   const [contentLocal, coursesLocal, testsLocal] = await Promise.all([
     serverGetPage<CareerContent>(
       withQuery("/career/content", { locale, limit: 6 }),
-      6,
     ),
-    serverGetPage<Course>(withQuery("/courses", { locale, limit: 3 }), 3),
-    serverGetPage<MockTest>(withQuery("/mock-tests", { locale, limit: 3 }), 3),
+    serverGetPage<Course>(withQuery("/courses", { locale, limit: 3 })),
+    serverGetPage<MockTest>(withQuery("/mock-tests", { locale, limit: 3 })),
   ]);
 
   const needsFallback = locale === "hi" && contentLocal.total === 0;
@@ -87,14 +86,13 @@ export default async function CareerHomePage({
     ? await Promise.all([
         serverGetPage<CareerContent>(
           withQuery("/career/content", { locale: "en", limit: 6 }),
-          6,
         ),
         coursesLocal.total
           ? Promise.resolve(coursesLocal)
-          : serverGetPage<Course>(withQuery("/courses", { locale: "en", limit: 3 }), 3),
+          : serverGetPage<Course>(withQuery("/courses", { locale: "en", limit: 3 })),
         testsLocal.total
           ? Promise.resolve(testsLocal)
-          : serverGetPage<MockTest>(withQuery("/mock-tests", { locale: "en", limit: 3 }), 3),
+          : serverGetPage<MockTest>(withQuery("/mock-tests", { locale: "en", limit: 3 })),
       ])
     : [contentLocal, coursesLocal, testsLocal];
 

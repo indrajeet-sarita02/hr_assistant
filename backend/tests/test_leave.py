@@ -194,3 +194,37 @@ def test_leave_types_are_returned_for_employee(client, login, db):
 
     cl = db.scalar(select(LeaveType).where(LeaveType.code == "CL"))
     assert cl is not None
+
+
+def test_leave_scope_filters(client, login):
+    employee = login("employee@example.com")
+    approver = login("approver@example.com")
+    leave_type_id = _leave_type(client, employee)
+    created = client.post(
+        "/api/v1/leave/requests",
+        headers={**employee, "Idempotency-Key": "leave-scope-1"},
+        json={
+            "leave_type_id": leave_type_id,
+            "start_at": "2026-12-07T00:00:00+05:30",
+            "end_at": "2026-12-08T00:00:00+05:30",
+            "reason": "Scope filter check",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    own = client.get("/api/v1/leave/requests?scope=own", headers=employee)
+    assert own.status_code == 200
+    assert [item["id"] for item in own.json()["items"]] == [created.json()["id"]]
+
+    employee_approvals = client.get(
+        "/api/v1/leave/requests?scope=approvals", headers=employee
+    )
+    assert employee_approvals.status_code == 403
+
+    approvals = client.get(
+        "/api/v1/leave/requests?scope=approvals", headers=approver
+    )
+    assert approvals.status_code == 200
+    assert created.json()["id"] in {
+        item["id"] for item in approvals.json()["items"]
+    }

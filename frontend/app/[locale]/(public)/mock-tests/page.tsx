@@ -31,13 +31,11 @@ export default async function MockTestsPage({
   const t = createTranslator(locale);
   const local = await serverGetPage<MockTest>(
     withQuery("/mock-tests", { locale, limit: 100 }),
-    100,
   );
   const tests =
     locale === "hi" && local.total === 0
       ? await serverGetPage<MockTest>(
           withQuery("/mock-tests", { locale: "en", limit: 100 }),
-          100,
         )
       : local;
 
