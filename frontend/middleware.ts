@@ -12,6 +12,7 @@ const aliasRoutes: Record<string, string> = {
   "/requests/queue": "/requests?scope=queue",
   "/onboarding/cases": "/onboarding",
   "/onboarding/tasks": "/onboarding",
+  "/leave/approvals": "/leave?tab=approvals",
   "/recruitment/requisitions": "/recruitment",
   "/recruitment/applications": "/recruitment",
   "/admin/members": "/admin?tab=members",

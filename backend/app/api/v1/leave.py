@@ -86,6 +86,30 @@ class LeaveRequestCreate(BaseModel):
         return value
 
 
+class LeaveRequestUpdate(BaseModel):
+    """Permitted edits to an undecided request.
+
+    Omitted fields are unchanged. ``reason`` can be cleared explicitly by
+    sending ``null``. ``version`` enables optimistic concurrency; a stale value
+    returns ``409 stale_version`` rather than silently overwriting a change made
+    by the employee or an approver.
+    """
+
+    leave_type_id: uuid.UUID | None = None
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+    reason: str | None = Field(default=None, max_length=2000)
+    partial_day: bool | None = None
+    version: int | None = Field(default=None, ge=1)
+
+    @field_validator("start_at", "end_at")
+    @classmethod
+    def timezone_aware(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("start_at and end_at must include a timezone offset")
+        return value
+
+
 class LeaveRequestOut(ORMModel):
     id: uuid.UUID
     employee_id: uuid.UUID
@@ -144,6 +168,13 @@ def _duration_days(payload: LeaveRequestCreate) -> Decimal:
     if payload.partial_day:
         return Decimal("0.50")
     return days
+
+
+def _request_days(start_at: datetime, end_at: datetime, partial_day: bool) -> Decimal:
+    if partial_day:
+        return Decimal("0.50")
+    seconds = (end_at - start_at).total_seconds()
+    return Decimal(str(seconds / 86400)).quantize(Decimal("0.01"))
 
 
 def _load_own_request(
@@ -499,6 +530,247 @@ def get_request(
     principal: Principal = Depends(get_principal),
 ) -> LeaveRequestOut:
     return LeaveRequestOut.model_validate(_load_own_request(db, principal, request_id))
+
+
+@router.patch("/requests/{request_id}", response_model=LeaveRequestOut)
+def update_request(
+    request_id: uuid.UUID,
+    payload: LeaveRequestUpdate,
+    db: DbSession,
+    principal: Principal = Depends(
+        require_internal_permission("leave.request.cancel_own")
+    ),
+) -> LeaveRequestOut:
+    item = db.scalar(
+        select(LeaveRequest)
+        .where(
+            LeaveRequest.id == request_id,
+            LeaveRequest.tenant_id == principal.tenant_id,
+        )
+        .with_for_update()
+    )
+    if item is None:
+        raise not_found("leave request")
+    employee = _employee_for_principal(db, principal)
+    if item.employee_id != employee.id:
+        raise not_found("leave request")
+    if employee.status != "active":
+        raise AppError(
+            422,
+            "business_rule_violation",
+            "leave.errors.employee_inactive",
+            "Inactive employees cannot change leave.",
+        )
+    if item.status not in {"pending", "needs_clarification"}:
+        raise invalid_state("Only undecided requests can be changed.")
+    if payload.version is not None and payload.version != item.version:
+        raise conflict(
+            "stale_version",
+            "This request changed since it was loaded. Refresh and try again.",
+        )
+
+    leave_type_id = payload.leave_type_id or item.leave_type_id
+    leave_type = db.scalar(
+        select(LeaveType).where(
+            LeaveType.id == leave_type_id,
+            LeaveType.tenant_id == principal.tenant_id,
+            LeaveType.active.is_(True),
+        )
+    )
+    if leave_type is None:
+        raise not_found("leave type")
+
+    start_at = payload.start_at or item.start_at
+    end_at = payload.end_at or item.end_at
+    partial_day = (
+        payload.partial_day if payload.partial_day is not None else item.partial_day
+    )
+    if end_at <= start_at:
+        raise AppError(
+            422,
+            "validation_error",
+            "errors.validation",
+            "end_at must be after start_at.",
+        )
+    if partial_day and not leave_type.allow_half_day:
+        raise AppError(
+            422,
+            "business_rule_violation",
+            "leave.errors.half_day_not_allowed",
+            "Half-day leave is not enabled for this leave type.",
+        )
+
+    overlap = db.scalar(
+        select(LeaveRequest).where(
+            LeaveRequest.tenant_id == principal.tenant_id,
+            LeaveRequest.employee_id == employee.id,
+            LeaveRequest.id != item.id,
+            LeaveRequest.status.in_(["pending", "approved", "needs_clarification"]),
+            and_(
+                LeaveRequest.start_at < end_at,
+                LeaveRequest.end_at > start_at,
+            ),
+        )
+    )
+    if overlap is not None:
+        raise conflict(
+            "leave_overlap",
+            "The selected dates overlap an existing leave request.",
+        )
+
+    old_days = _request_days(item.start_at, item.end_at, item.partial_day)
+    new_days = _request_days(start_at, end_at, partial_day)
+    if new_days <= 0 or new_days > 60:
+        raise AppError(
+            422,
+            "validation_error",
+            "errors.validation",
+            "Leave duration must be between 0 and 60 days.",
+        )
+
+    old_balance = _balance_for(
+        db, principal.tenant_id, item.employee_id, item.leave_type_id
+    )
+    if leave_type.id == item.leave_type_id:
+        if old_balance is None:
+            raise AppError(
+                422,
+                "business_rule_violation",
+                "leave.errors.no_balance",
+                "No applicable leave balance is configured.",
+            )
+        available = (
+            old_balance.entitled
+            + old_balance.carried_forward
+            - old_balance.consumed
+            - old_balance.pending
+            + old_days
+        )
+        if available < new_days:
+            raise AppError(
+                422,
+                "business_rule_violation",
+                "leave.errors.insufficient_balance",
+                "The request exceeds the available leave balance.",
+                details=[
+                    {
+                        "field": "leave_type_id",
+                        "code": "insufficient_balance",
+                        "message_key": "leave.errors.insufficient_balance",
+                    }
+                ],
+            )
+        old_balance.pending = max(
+            Decimal("0"), old_balance.pending - old_days + new_days
+        )
+        old_balance.version += 1
+        db.add(old_balance)
+    else:
+        new_balance = _balance_for(
+            db, principal.tenant_id, item.employee_id, leave_type.id
+        )
+        if new_balance is None:
+            raise AppError(
+                422,
+                "business_rule_violation",
+                "leave.errors.no_balance",
+                "No applicable leave balance is configured.",
+            )
+        available = (
+            new_balance.entitled
+            + new_balance.carried_forward
+            - new_balance.consumed
+            - new_balance.pending
+        )
+        if available < new_days:
+            raise AppError(
+                422,
+                "business_rule_violation",
+                "leave.errors.insufficient_balance",
+                "The request exceeds the available leave balance.",
+                details=[
+                    {
+                        "field": "leave_type_id",
+                        "code": "insufficient_balance",
+                        "message_key": "leave.errors.insufficient_balance",
+                    }
+                ],
+            )
+        if old_balance is not None:
+            old_balance.pending = max(Decimal("0"), old_balance.pending - old_days)
+            old_balance.version += 1
+            db.add(old_balance)
+        new_balance.pending += new_days
+        new_balance.version += 1
+        db.add(new_balance)
+
+    now = datetime.now(UTC)
+    if leave_type.id != item.leave_type_id or old_days != new_days:
+        db.add(
+            LeaveLedger(
+                tenant_id=principal.tenant_id,
+                request_id=item.id,
+                employee_id=item.employee_id,
+                leave_type_id=item.leave_type_id,
+                entry_type="release",
+                days=old_days,
+                created_at=now,
+            )
+        )
+        db.add(
+            LeaveLedger(
+                tenant_id=principal.tenant_id,
+                request_id=item.id,
+                employee_id=item.employee_id,
+                leave_type_id=leave_type.id,
+                entry_type="reserve",
+                days=new_days,
+                created_at=now,
+            )
+        )
+
+    before = {
+        "leave_type_id": str(item.leave_type_id),
+        "start_at": item.start_at.isoformat(),
+        "end_at": item.end_at.isoformat(),
+        "partial_day": item.partial_day,
+        "reason": item.reason,
+    }
+    item.leave_type_id = leave_type.id
+    item.start_at = start_at
+    item.end_at = end_at
+    item.partial_day = partial_day
+    if "reason" in payload.model_fields_set:
+        item.reason = payload.reason
+    item.version += 1
+    db.add(item)
+    write_audit(
+        db,
+        principal,
+        "leave.request.updated",
+        target_type="leave_request",
+        target_id=item.id,
+        metadata={
+            "before": before,
+            "after": {
+                "leave_type_id": str(item.leave_type_id),
+                "start_at": item.start_at.isoformat(),
+                "end_at": item.end_at.isoformat(),
+                "partial_day": item.partial_day,
+                "reason": item.reason,
+            },
+        },
+    )
+    write_outbox(
+        db,
+        principal.tenant_id,
+        "leave.request.updated",
+        "leave_request",
+        item.id,
+        {"employee_id": str(item.employee_id)},
+    )
+    db.commit()
+    return LeaveRequestOut.model_validate(item)
 
 
 @router.post("/requests/{request_id}/decision", response_model=DecisionOut)

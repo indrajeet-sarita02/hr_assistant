@@ -28,6 +28,7 @@ from app.core.errors import (
     unhandled_error_handler,
     validation_error_handler,
 )
+from app.core.i18n import negotiate_locale
 from app.core.logging import configure_logging, get_logger, request_id_ctx
 from app.db.session import SessionLocal
 
@@ -92,6 +93,12 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             else uuid.uuid4().hex
         )
         token = request_id_ctx.set(request_id)
+        # Authenticated dependencies refine this value with the user's stored
+        # preference and the tenant default. Anonymous API responses still
+        # honour Accept-Language.
+        request.state.locale = negotiate_locale(
+            None, request.headers.get("accept-language"), None
+        )
         started = time.perf_counter()
         try:
             response = await call_next(request)
@@ -116,8 +123,8 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             else:
                 response.headers.setdefault("Cache-Control", "no-store")
             if request.url.path.startswith("/api/v1"):
-                response.headers.setdefault(
-                    "Content-Language", settings.default_locale
+                response.headers["Content-Language"] = getattr(
+                    request.state, "locale", settings.default_locale
                 )
             logger.info(
                 "request_completed",

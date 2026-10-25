@@ -178,6 +178,20 @@ def me(
     db: DbSession,
     principal: Principal = Depends(get_principal),
 ) -> MeOut:
+    memberships = (
+        list(
+            db.scalars(
+                select(TenantMembership)
+                .where(
+                    TenantMembership.user_id == principal.user_id,
+                    TenantMembership.status == "active",
+                )
+                .order_by(TenantMembership.created_at)
+            )
+        )
+        if principal.is_internal
+        else []
+    )
     return MeOut(
         user=UserOut.model_validate(principal.user),
         active_tenant=TenantOut.model_validate(principal.tenant) if principal.tenant else None,
@@ -186,6 +200,7 @@ def me(
             if principal.membership
             else None
         ),
+        memberships=[MembershipOut.model_validate(item) for item in memberships],
         roles=list(principal.roles),
         permissions=sorted(principal.permissions),
         audience=principal.audience,
@@ -200,10 +215,12 @@ def get_locale(principal: Principal = Depends(get_principal)) -> dict[str, str]:
 @router.put("/preferences/locale", response_model=MessageOut)
 def update_locale(
     payload: LocaleIn,
+    request: Request,
     db: DbSession,
     principal: Principal = Depends(get_principal),
 ) -> MessageOut:
     principal.user.locale = payload.locale
+    request.state.locale = payload.locale
     db.add(principal.user)
     write_audit(
         db,

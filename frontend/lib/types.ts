@@ -39,6 +39,7 @@ export interface Me {
   user: User;
   active_tenant: Tenant | null;
   membership: Membership | null;
+  memberships: Membership[];
   roles: string[];
   permissions: string[];
   audience: "hr-api-internal" | "career-api-public" | string;

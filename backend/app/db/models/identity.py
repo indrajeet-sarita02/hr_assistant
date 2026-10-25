@@ -21,7 +21,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base, TimestampMixin, VersionMixin, new_uuid
 
 
-class Organization(Base, TimestampMixin):
+class Organization(Base, TimestampMixin, VersionMixin):
     __tablename__ = "organizations"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=new_uuid)

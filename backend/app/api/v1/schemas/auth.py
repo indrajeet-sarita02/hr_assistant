@@ -61,6 +61,7 @@ class TenantOut(ORMModel):
     id: uuid.UUID
     name: str
     slug: str
+    status: str
     default_locale: str
     timezone: str
 
@@ -75,6 +76,7 @@ class MeOut(BaseModel):
     user: UserOut
     active_tenant: TenantOut | None
     membership: MembershipOut | None
+    memberships: list[MembershipOut] = Field(default_factory=list)
     roles: list[str]
     permissions: list[str]
     audience: str

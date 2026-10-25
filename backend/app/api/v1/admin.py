@@ -82,6 +82,7 @@ class SettingsIn(BaseModel):
     default_locale: str | None = None
     timezone: str | None = None
     settings: dict | None = None
+    version: int | None = Field(default=None, ge=1)
 
 
 class LeaveTypeIn(BaseModel):
@@ -432,7 +433,7 @@ def get_settings(
         default_locale=tenant.default_locale,
         timezone=tenant.timezone,
         settings=tenant.settings,
-        version=1,
+        version=tenant.version,
     )
 
 
@@ -442,9 +443,18 @@ def update_settings(
     db: DbSession,
     principal: Principal = Depends(require_internal_permission("admin.settings.manage")),
 ) -> SettingsOut:
-    tenant = db.get(Organization, principal.tenant_id)
+    tenant = db.scalar(
+        select(Organization)
+        .where(Organization.id == principal.tenant_id)
+        .with_for_update()
+    )
     if tenant is None:
         raise not_found("organization")
+    if payload.version is not None and payload.version != tenant.version:
+        raise conflict(
+            "stale_version",
+            "These settings changed since they were loaded. Refresh and try again.",
+        )
     if payload.default_locale is not None:
         if payload.default_locale not in {"en", "hi"}:
             raise AppError(422, "validation_error", "errors.validation", "Invalid locale.")
@@ -455,6 +465,7 @@ def update_settings(
         tenant.timezone = payload.timezone
     if payload.settings is not None:
         tenant.settings = payload.settings
+    tenant.version += 1
     db.add(tenant)
     write_audit(
         db,
@@ -469,7 +480,7 @@ def update_settings(
         default_locale=tenant.default_locale,
         timezone=tenant.timezone,
         settings=tenant.settings,
-        version=1,
+        version=tenant.version,
     )
 
 
