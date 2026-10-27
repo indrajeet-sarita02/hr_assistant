@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Annotated
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, Header, Response, status
 from pydantic import BaseModel, Field, field_validator
@@ -162,19 +163,71 @@ def _employee_for_principal(db: Session, principal: Principal) -> EmployeeProfil
     return employee
 
 
-def _duration_days(payload: LeaveRequestCreate) -> Decimal:
-    seconds = (payload.end_at - payload.start_at).total_seconds()
-    days = Decimal(str(seconds / 86400)).quantize(Decimal("0.01"))
-    if payload.partial_day:
-        return Decimal("0.50")
-    return days
+def _tenant_timezone(principal: Principal) -> ZoneInfo:
+    name = (principal.tenant.timezone if principal.tenant else None) or "UTC"
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return ZoneInfo("UTC")
 
 
-def _request_days(start_at: datetime, end_at: datetime, partial_day: bool) -> Decimal:
+def _working_days(
+    db: Session,
+    principal: Principal,
+    start_at: datetime,
+    end_at: datetime,
+    partial_day: bool,
+) -> Decimal:
+    """Count chargeable leave days using the tenant calendar.
+
+    The date range is treated as inclusive of the end date when it carries a
+    time of day (the UI submits 09:00–18:00), and as a half-open interval when
+    the end is exactly midnight. Weekends and tenant holidays do not consume
+    leave unless the calendar marks the date as a working-day override.
+    """
     if partial_day:
         return Decimal("0.50")
-    seconds = (end_at - start_at).total_seconds()
-    return Decimal(str(seconds / 86400)).quantize(Decimal("0.01"))
+    if end_at <= start_at:
+        return Decimal("0.00")
+
+    timezone = _tenant_timezone(principal)
+    start = start_at.astimezone(timezone)
+    end = end_at.astimezone(timezone)
+    last_date = end.date()
+    if end.time() == time(0, 0):
+        last_date -= timedelta(days=1)
+    if last_date < start.date():
+        return Decimal("0.00")
+
+    calendar = db.scalar(
+        select(HolidayCalendar)
+        .where(HolidayCalendar.tenant_id == principal.tenant_id)
+        .order_by(HolidayCalendar.code)
+        .limit(1)
+    )
+    overrides: dict[date, bool] = {}
+    if calendar is not None:
+        rows = db.execute(
+            select(Holiday.holiday_date, Holiday.is_working_day_override).where(
+                Holiday.tenant_id == principal.tenant_id,
+                Holiday.calendar_id == calendar.id,
+                Holiday.holiday_date >= start.date(),
+                Holiday.holiday_date <= last_date,
+            )
+        ).all()
+        overrides = {row[0]: row[1] for row in rows}
+
+    count = 0
+    cursor = start.date()
+    while cursor <= last_date:
+        override = overrides.get(cursor)
+        working = cursor.weekday() < 5
+        if override is not None:
+            working = override
+        if working:
+            count += 1
+        cursor += timedelta(days=1)
+    return Decimal(count).quantize(Decimal("0.01"))
 
 
 def _load_own_request(
@@ -409,13 +462,22 @@ def create_request(
             "leave_overlap",
             "The selected dates overlap an existing leave request.",
         )
-    days = _duration_days(payload)
-    if days <= 0 or days > 60:
+    days = _working_days(
+        db, principal, payload.start_at, payload.end_at, payload.partial_day
+    )
+    if days <= 0:
+        raise AppError(
+            422,
+            "business_rule_violation",
+            "leave.errors.no_working_days",
+            "The selected dates contain no working days in the tenant calendar.",
+        )
+    if days > 60:
         raise AppError(
             422,
             "validation_error",
             "errors.validation",
-            "Leave duration must be between 0 and 60 days.",
+            "Leave duration must be between 0 and 60 working days.",
         )
     balance = _balance_for(
         db, principal.tenant_id, employee.id, payload.leave_type_id
@@ -618,14 +680,23 @@ def update_request(
             "The selected dates overlap an existing leave request.",
         )
 
-    old_days = _request_days(item.start_at, item.end_at, item.partial_day)
-    new_days = _request_days(start_at, end_at, partial_day)
-    if new_days <= 0 or new_days > 60:
+    old_days = _working_days(
+        db, principal, item.start_at, item.end_at, item.partial_day
+    )
+    new_days = _working_days(db, principal, start_at, end_at, partial_day)
+    if new_days <= 0:
+        raise AppError(
+            422,
+            "business_rule_violation",
+            "leave.errors.no_working_days",
+            "The selected dates contain no working days in the tenant calendar.",
+        )
+    if new_days > 60:
         raise AppError(
             422,
             "validation_error",
             "errors.validation",
-            "Leave duration must be between 0 and 60 days.",
+            "Leave duration must be between 0 and 60 working days.",
         )
 
     old_balance = _balance_for(
@@ -807,11 +878,9 @@ def decide(
     balance = _balance_for(
         db, principal.tenant_id, item.employee_id, item.leave_type_id
     )
-    days = Decimal(
-        str((item.end_at - item.start_at).total_seconds() / 86400)
-    ).quantize(Decimal("0.01"))
-    if item.partial_day:
-        days = Decimal("0.50")
+    days = _working_days(
+        db, principal, item.start_at, item.end_at, item.partial_day
+    )
     if balance is not None:
         if payload.decision == "approved":
             balance.pending = max(Decimal("0"), balance.pending - days)
@@ -905,11 +974,9 @@ def cancel(
     if item.status not in {"pending", "approved", "needs_clarification"}:
         raise invalid_state()
     now = datetime.now(UTC)
-    days = Decimal(
-        str((item.end_at - item.start_at).total_seconds() / 86400)
-    ).quantize(Decimal("0.01"))
-    if item.partial_day:
-        days = Decimal("0.50")
+    days = _working_days(
+        db, principal, item.start_at, item.end_at, item.partial_day
+    )
     balance = _balance_for(
         db, principal.tenant_id, item.employee_id, item.leave_type_id
     )

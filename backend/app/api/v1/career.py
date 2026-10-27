@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Request, status
@@ -11,7 +11,7 @@ from sqlalchemy import or_, select
 from app.api.deps import DbSession, client_key, get_optional_principal
 from app.api.pagination import count_rows
 from app.api.v1.schemas.common import ORMModel, Page
-from app.core.errors import AppError, not_found
+from app.core.errors import AppError, conflict, not_found
 from app.core.ratelimit import limit_public_write
 from app.db.models import CareerContent, ContentReport, Course, MockTest
 from app.domains.identity import Principal
@@ -233,6 +233,24 @@ def report_content(
         ) is not None
     if not exists:
         raise not_found("content")
+    if principal is not None:
+        duplicate = db.scalar(
+            select(ContentReport.id)
+            .where(
+                ContentReport.reporter_user_id == principal.user_id,
+                ContentReport.content_type == payload.content_type,
+                ContentReport.content_id == payload.content_id,
+                ContentReport.status.in_(["open", "triaged"]),
+                ContentReport.created_at
+                >= datetime.now(UTC) - timedelta(hours=24),
+            )
+            .limit(1)
+        )
+        if duplicate is not None:
+            raise conflict(
+                "duplicate_report",
+                "You already reported this content and our editors are reviewing it.",
+            )
     report = ContentReport(
         tenant_id=principal.tenant_id if principal else None,
         content_type=payload.content_type,

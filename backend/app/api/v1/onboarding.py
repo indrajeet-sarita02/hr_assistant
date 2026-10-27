@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, date, datetime, timedelta
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Header, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 
@@ -20,9 +21,11 @@ from app.db.models import (
     OnboardingTemplateTask,
 )
 from app.domains.audit import write_audit, write_outbox
+from app.domains.idempotency import begin, complete
 from app.domains.identity import Principal
 
 router = APIRouter(prefix="/onboarding", tags=["Onboarding"])
+IdempotencyHeader = Annotated[str, Header(alias="Idempotency-Key")]
 
 TASK_TRANSITIONS = {
     "not_started": {"in_progress", "blocked", "waived"},
@@ -366,9 +369,22 @@ def list_cases(
 @router.post("/cases", response_model=CaseOut, status_code=status.HTTP_201_CREATED)
 def create_case(
     payload: CaseIn,
+    response: Response,
+    idempotency_key: IdempotencyHeader,
     db: DbSession,
     principal: Principal = Depends(require_internal_permission("onboarding.case.create")),
 ) -> CaseOut:
+    state = begin(
+        db,
+        principal,
+        "POST /api/v1/onboarding/cases",
+        idempotency_key,
+        payload.model_dump(mode="json"),
+    )
+    if state.replay:
+        response.status_code = state.record.response_status or status.HTTP_200_OK
+        return CaseOut.model_validate(state.record.response_body)
+
     employee = db.scalar(
         select(EmployeeProfile).where(
             EmployeeProfile.id == payload.employee_id,
@@ -452,8 +468,17 @@ def create_case(
         case.id,
         {"employee_user_id": str(employee.user_id)},
     )
+    body = CaseOut.model_validate(case).model_dump(mode="json")
+    complete(
+        db,
+        state,
+        status_code=status.HTTP_201_CREATED,
+        body=body,
+        resource_type="onboarding_case",
+        resource_id=case.id,
+    )
     db.commit()
-    return CaseOut.model_validate(case)
+    return CaseOut.model_validate(body)
 
 
 @router.patch("/cases/{case_id}", response_model=CaseOut)

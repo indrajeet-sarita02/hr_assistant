@@ -28,9 +28,13 @@ _UPLOAD_PERMISSIONS = {
     "service_request.create",
 }
 _INSPECT_PERMISSIONS = {
+    "onboarding.case.read",
     "onboarding.case.create",
+    "onboarding.task.update_assigned",
     "recruitment.application.read_assigned",
+    "recruitment.application.stage.update",
     "service_request.read_queue",
+    "service_request.update_assigned",
 }
 
 

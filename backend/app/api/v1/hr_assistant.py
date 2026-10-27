@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select
+from sqlalchemy import and_, func, or_, select
 
 from app.api.deps import DbSession, client_key, require_internal_permission
 from app.api.v1.schemas.common import ORMModel
@@ -96,36 +96,130 @@ def ask(
     if locale not in settings.supported_locales:
         locale = principal.tenant.default_locale if principal.tenant else "en"
 
+    today = datetime.now(UTC).date()
     terms = [term for term in re.findall(r"[\w\u0900-\u097F]+", payload.question) if len(term) > 2]
-    stmt = (
-        select(KnowledgeChunk, PolicyDocument)
-        .join(PolicyDocument, PolicyDocument.id == KnowledgeChunk.policy_document_id)
-        .where(
+    filters = [KnowledgeChunk.content.ilike(f"%{term}%") for term in terms[:8]]
+    current_window = and_(
+        or_(
+            PolicyDocument.effective_from.is_(None),
+            PolicyDocument.effective_from <= today,
+        ),
+        or_(
+            PolicyDocument.effective_to.is_(None),
+            PolicyDocument.effective_to >= today,
+        ),
+    )
+    stale_window = or_(
+        and_(
+            PolicyDocument.effective_from.is_not(None),
+            PolicyDocument.effective_from > today,
+        ),
+        and_(
+            PolicyDocument.effective_to.is_not(None),
+            PolicyDocument.effective_to < today,
+        ),
+    )
+    base_conditions = [
+        KnowledgeChunk.tenant_id == principal.tenant_id,
+        KnowledgeChunk.active.is_(True),
+        PolicyDocument.tenant_id == principal.tenant_id,
+        PolicyDocument.status == "published",
+        PolicyDocument.locale == locale,
+        current_window,
+    ]
+    if filters:
+        base_conditions.append(or_(*filters))
+
+    # Only approved, currently effective, tenant-authorized sources are eligible.
+    # A question with no usable search terms must not return arbitrary passages.
+    rows: list[tuple[KnowledgeChunk, PolicyDocument]] = []
+    if terms:
+        stmt = (
+            select(KnowledgeChunk, PolicyDocument)
+            .join(PolicyDocument, PolicyDocument.id == KnowledgeChunk.policy_document_id)
+            .where(*base_conditions)
+            .order_by(
+                PolicyDocument.effective_from.desc().nullslast(),
+                KnowledgeChunk.chunk_index,
+            )
+            .limit(5)
+        )
+        rows = list(db.execute(stmt).all())
+
+    conflicting_title: str | None = None
+    if rows:
+        conflicting_title = db.scalar(
+            select(PolicyDocument.title)
+            .join(
+                KnowledgeChunk,
+                KnowledgeChunk.policy_document_id == PolicyDocument.id,
+            )
+            .where(*base_conditions)
+            .group_by(PolicyDocument.title)
+            .having(func.count(func.distinct(PolicyDocument.id)) > 1)
+            .limit(1)
+        )
+
+    request_id = request_id_ctx.get()
+    fallback = {
+        "route": "hr_support",
+        "message_key": "assistant.fallback.hr_support",
+    }
+    if not rows:
+        chunks = []
+        stale_conditions = [
             KnowledgeChunk.tenant_id == principal.tenant_id,
             KnowledgeChunk.active.is_(True),
             PolicyDocument.tenant_id == principal.tenant_id,
             PolicyDocument.status == "published",
             PolicyDocument.locale == locale,
+            stale_window,
+        ]
+        if filters:
+            stale_conditions.append(or_(*filters))
+        stale = (
+            db.scalar(
+                select(KnowledgeChunk.id)
+                .join(
+                    PolicyDocument,
+                    PolicyDocument.id == KnowledgeChunk.policy_document_id,
+                )
+                .where(*stale_conditions)
+                .limit(1)
+            )
+            is not None
+            if terms
+            else False
         )
-        .limit(5)
-    )
-    if terms:
-        filters = [KnowledgeChunk.content.ilike(f"%{term}%") for term in terms[:8]]
-        stmt = stmt.where(or_(*filters))
-    rows = list(db.execute(stmt).all())
-
-    request_id = request_id_ctx.get()
-    if not rows:
-        chunks = []
-        answer_status = "insufficient_evidence"
+        if stale:
+            answer_status = "stale_source"
+            answer = (
+                "The policy guidance that matched this question is not currently "
+                "effective. I cannot treat it as approved guidance. Please contact "
+                "your HR support team for the current policy."
+            )
+        else:
+            answer_status = "insufficient_evidence"
+            answer = (
+                "I could not find an approved policy source that answers this question. "
+                "Please contact your HR support team for confirmation."
+            )
+    elif conflicting_title is not None:
+        versions = sorted(
+            {
+                document.version
+                for _chunk, document in rows
+                if document.title == conflicting_title
+            }
+        )
+        version_text = f" ({', '.join(versions)})" if versions else ""
+        answer_status = "conflicting_sources"
         answer = (
-            "I could not find an approved policy source that answers this question. "
-            "Please contact your HR support team for confirmation."
+            f"More than one current version of “{conflicting_title}”{version_text} "
+            "matched this question. I will not choose between them. Please confirm "
+            "with your HR support team which policy applies."
         )
-        fallback = {
-            "route": "hr_support",
-            "message_key": "assistant.fallback.hr_support",
-        }
+        chunks = rows[:5]
     else:
         answer_status = "grounded"
         chunks = rows[:3]

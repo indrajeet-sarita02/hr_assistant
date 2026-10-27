@@ -11,6 +11,7 @@ from app.api.v1 import (
     leave,
     notifications,
     onboarding,
+    policies,
     recruitment,
     reports,
     resumes,
@@ -28,6 +29,7 @@ api_router.include_router(recruitment.router)
 api_router.include_router(reports.router)
 api_router.include_router(notifications.router)
 api_router.include_router(documents.router)
+api_router.include_router(policies.router)
 api_router.include_router(career.router)
 api_router.include_router(assessments.router)
 api_router.include_router(resumes.router)

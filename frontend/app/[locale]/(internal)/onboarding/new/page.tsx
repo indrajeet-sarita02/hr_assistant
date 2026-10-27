@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, CalendarDays, Info, UserPlus } from "lucide-react";
@@ -15,6 +15,7 @@ import { Spinner } from "@/components/ui/States";
 import { apiFetch, errorMessage, fieldError } from "@/lib/api-client";
 import { formatNumber } from "@/lib/format";
 import { useAsync } from "@/lib/hooks";
+import { newIdempotencyKey } from "@/lib/idempotency";
 import { hasPermission, permissions } from "@/lib/permissions";
 import type { OnboardingCase, OnboardingTemplate } from "@/lib/types";
 
@@ -39,6 +40,7 @@ export default function NewOnboardingCasePage() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<unknown>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const idempotencyKey = useRef(newIdempotencyKey());
 
   const selectedTemplate = useMemo(() => {
     if (!data?.length) return null;
@@ -59,6 +61,7 @@ export default function NewOnboardingCasePage() {
     try {
       const created = await apiFetch<OnboardingCase>("/onboarding/cases", {
         method: "POST",
+        idempotencyKey: idempotencyKey.current,
         json: {
           employee_id: employeeId.trim(),
           template_id: selectedTemplate.id,

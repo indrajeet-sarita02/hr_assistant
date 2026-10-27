@@ -91,13 +91,34 @@ export default function NewLeaveRequestPage() {
       .slice(0, 5);
   }, [data?.calendars]);
 
+  const holidayOverrides = useMemo<Map<string, boolean>>(() => {
+    const overrides = new Map<string, boolean>();
+    for (const calendar of data?.calendars ?? []) {
+      for (const holiday of calendar.holidays) {
+        overrides.set(holiday.date, holiday.working_day_override);
+      }
+    }
+    return overrides;
+  }, [data?.calendars]);
+
   const dayCount = useMemo(() => {
     if (partialDay) return 0.5;
     const start = new Date(`${startDate}T00:00:00`);
     const end = new Date(`${endDate}T00:00:00`);
     if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
-    return Math.max(0, Math.round((end.getTime() - start.getTime()) / 86400000) + 1);
-  }, [startDate, endDate, partialDay]);
+    if (end < start) return 0;
+    let count = 0;
+    const cursor = new Date(start);
+    while (cursor <= end) {
+      const override = holidayOverrides.get(localDateString(cursor));
+      const weekend = cursor.getDay() === 0 || cursor.getDay() === 6;
+      if (override === true || (override !== false && !weekend)) {
+        count += 1;
+      }
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    return count;
+  }, [startDate, endDate, partialDay, holidayOverrides]);
 
   const available = balance
     ? Math.max(
@@ -116,6 +137,9 @@ export default function NewLeaveRequestPage() {
     if (!startDate) errors.start = t("leave.invalid_dates");
     if (!partialDay && !endDate) errors.end = t("leave.invalid_dates");
     if (!partialDay && endDate < startDate) errors.end = t("leave.invalid_dates");
+    if (!partialDay && startDate && endDate && endDate >= startDate && dayCount === 0) {
+      errors.start = t("leave.no_working_days");
+    }
     if (available !== null && dayCount > available && selectedType?.requires_approval) {
       errors.balance = t("leave.insufficient");
     }

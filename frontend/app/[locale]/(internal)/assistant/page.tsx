@@ -27,6 +27,45 @@ type ChatMessage =
   | { id: number; role: "assistant"; answer: AssistantAnswer }
   | { id: number; role: "assistant_error"; text: string };
 
+type AnswerStatusCopy = {
+  label: string;
+  body: string;
+  tone: "success" | "warning" | "danger";
+};
+
+const answerStatusCopy: Record<string, AnswerStatusCopy> = {
+  grounded: {
+    label: "assistant.grounded",
+    body: "",
+    tone: "success",
+  },
+  insufficient_evidence: {
+    label: "assistant.insufficient",
+    body: "assistant.fallback_body",
+    tone: "warning",
+  },
+  conflicting_sources: {
+    label: "assistant.status_conflicting",
+    body: "assistant.fallback_conflicting",
+    tone: "warning",
+  },
+  stale_source: {
+    label: "assistant.status_stale",
+    body: "assistant.fallback_stale",
+    tone: "warning",
+  },
+  unauthorized_source: {
+    label: "assistant.status_unauthorized",
+    body: "assistant.fallback_unauthorized",
+    tone: "warning",
+  },
+  provider_unavailable: {
+    label: "assistant.status_provider_unavailable",
+    body: "assistant.fallback_provider_unavailable",
+    tone: "danger",
+  },
+};
+
 export default function AssistantPage() {
   const { locale, t } = useI18n();
   const { me } = useSession();
@@ -213,23 +252,30 @@ export default function AssistantPage() {
 
               const answer = message.answer;
               const grounded = answer.answer_status === "grounded";
+              const copy =
+                answerStatusCopy[answer.answer_status] ??
+                answerStatusCopy.insufficient_evidence;
               return (
                 <div className="chat-message" key={message.id}>
                   <span className="chat-avatar">AI</span>
                   <div className="chat-bubble">
                     <div className="chat-answer-status">
-                      <span className={`badge ${grounded ? "badge-success" : "badge-warning"}`}>
-                        {grounded ? t("assistant.grounded") : t("assistant.insufficient")}
+                      <span className={`badge badge-${copy.tone}`}>
+                        {t(copy.label)}
                       </span>
                     </div>
                     <div className="chat-answer-text">{answer.answer}</div>
 
                     {!grounded && (
-                      <div className="alert alert-warning mt-3">
+                      <div
+                        className={`alert ${
+                          copy.tone === "danger" ? "alert-error" : "alert-warning"
+                        } mt-3`}
+                      >
                         <LifeBuoy size={16} aria-hidden="true" />
                         <div>
-                          <strong>{t("assistant.insufficient")}</strong>
-                          {t("assistant.fallback_body")}
+                          <strong>{t(copy.label)}</strong>
+                          {t(copy.body)}
                           <div className="mt-2">
                             <Link className="btn btn-secondary btn-sm" href={`/${locale}/requests/new`}>
                               {t("assistant.raise_request")}

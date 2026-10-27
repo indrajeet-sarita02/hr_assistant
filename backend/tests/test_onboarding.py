@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db.models import (
     EmployeeProfile,
+    IdempotencyKey,
     OnboardingCase,
     OnboardingTask,
     OnboardingTemplate,
@@ -33,7 +34,7 @@ def test_onboarding_required_evidence_and_owner_scope(client, login, db):
     template = _template(client, hr)
     created = client.post(
         "/api/v1/onboarding/cases",
-        headers=hr,
+        headers={**hr, "Idempotency-Key": "onboarding-case-required-evidence"},
         json={
             "employee_id": _employee_id(db),
             "template_id": template["id"],
@@ -154,7 +155,7 @@ def test_onboarding_case_closure_after_all_tasks_are_resolved(client, login, db)
     template = _template(client, hr)
     created = client.post(
         "/api/v1/onboarding/cases",
-        headers=hr,
+        headers={**hr, "Idempotency-Key": "onboarding-case-close"},
         json={
             "employee_id": _employee_id(db),
             "template_id": template["id"],
@@ -187,7 +188,7 @@ def test_onboarding_cases_are_limited_to_the_employee(client, login, db):
     template = _template(client, hr)
     created = client.post(
         "/api/v1/onboarding/cases",
-        headers=hr,
+        headers={**hr, "Idempotency-Key": "onboarding-case-employee-scope"},
         json={
             "employee_id": _employee_id(db),
             "template_id": template["id"],
@@ -257,3 +258,36 @@ def test_template_detail_is_tenant_scoped(client, login):
         headers=hr,
     )
     assert missing.status_code == 404
+
+
+def test_onboarding_case_creation_is_idempotent(client, login, db):
+    hr = login("hr@example.com")
+    template = _template(client, hr)
+    payload = {
+        "employee_id": _employee_id(db),
+        "template_id": template["id"],
+        "start_date": "2026-11-02",
+    }
+    headers = {**hr, "Idempotency-Key": "onboarding-case-replay"}
+
+    created = client.post("/api/v1/onboarding/cases", headers=headers, json=payload)
+    assert created.status_code == 201, created.text
+
+    replay = client.post("/api/v1/onboarding/cases", headers=headers, json=payload)
+    assert replay.status_code == 201
+    assert replay.json() == created.json()
+
+    conflict = client.post(
+        "/api/v1/onboarding/cases",
+        headers=headers,
+        json={**payload, "start_date": "2026-11-03"},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "idempotency_conflict"
+
+    assert db.scalar(select(func.count()).select_from(OnboardingCase)) == 1
+    key = headers["Idempotency-Key"]
+    record = db.scalar(select(IdempotencyKey).where(IdempotencyKey.key == key))
+    assert record is not None
+    assert record.status == "completed"
+    assert str(record.resource_id) == created.json()["id"]
