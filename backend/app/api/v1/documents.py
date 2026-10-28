@@ -13,7 +13,7 @@ from app.api.pagination import count_rows
 from app.api.v1.schemas.common import ORMModel, Page
 from app.core.config import settings
 from app.core.errors import AppError, forbidden, not_found
-from app.db.models import Document
+from app.db.models import Document, EmployeeProfile
 from app.domains.audit import write_audit
 from app.domains.identity import Principal
 
@@ -26,15 +26,6 @@ _UPLOAD_PERMISSIONS = {
     "recruitment.application.create",
     "resume.manage_own",
     "service_request.create",
-}
-_INSPECT_PERMISSIONS = {
-    "onboarding.case.read",
-    "onboarding.case.create",
-    "onboarding.task.update_assigned",
-    "recruitment.application.read_assigned",
-    "recruitment.application.stage.update",
-    "service_request.read_queue",
-    "service_request.update_assigned",
 }
 
 
@@ -110,10 +101,23 @@ def _can_upload(principal: Principal) -> bool:
     return bool(_UPLOAD_PERMISSIONS.intersection(principal.permissions))
 
 
-def _can_inspect(principal: Principal, document: Document) -> bool:
+def _can_inspect(db: DbSession, principal: Principal, document: Document) -> bool:
     if document.uploaded_by == principal.user_id:
         return True
-    return bool(_INSPECT_PERMISSIONS.intersection(principal.permissions))
+    if document.owner_type == "user":
+        return document.owner_id == principal.user_id
+    if document.owner_type == "employee":
+        return (
+            db.scalar(
+                select(EmployeeProfile.id).where(
+                    EmployeeProfile.id == document.owner_id,
+                    EmployeeProfile.tenant_id == principal.tenant_id,
+                    EmployeeProfile.user_id == principal.user_id,
+                )
+            )
+            is not None
+        )
+    return False
 
 
 @router.get("", response_model=Page[DocumentOut])
@@ -197,7 +201,7 @@ def get_document(
             Document.tenant_id == principal.tenant_id,
         )
     )
-    if document is None or not _can_inspect(principal, document):
+    if document is None or not _can_inspect(db, principal, document):
         raise not_found("document")
     return DocumentOut.model_validate(document)
 
@@ -214,7 +218,7 @@ def download_document(
             Document.tenant_id == principal.tenant_id,
         )
     )
-    if document is None or not _can_inspect(principal, document):
+    if document is None or not _can_inspect(db, principal, document):
         raise not_found("document")
     if document.scan_status != "clean":
         raise AppError(

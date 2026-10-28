@@ -4,7 +4,7 @@ from datetime import datetime
 
 from sqlalchemy import select
 
-from app.db.models import LeaveType, Organization
+from app.db.models import LeaveType, Organization, Role
 from tests.factories import create_tenant_user
 
 
@@ -107,3 +107,57 @@ def test_naive_leave_datetimes_are_rejected(client, login):
     )
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "validation_error"
+
+
+def test_approval_rules_reject_approvers_from_other_tenants(client, login, db):
+    admin = login("admin@example.com")
+    outsider = create_tenant_user(
+        email="other-approver@example.com",
+        role_code="employee",
+        tenant_slug="other",
+    )
+    outsider_role = Role(
+        tenant_id=outsider["tenant_id"],
+        code="other_tenant_approver",
+        name="Other Tenant Approver",
+    )
+    db.add(outsider_role)
+    db.commit()
+
+    global_role = db.scalar(select(Role).where(Role.code == "approver"))
+    assert global_role is not None
+    valid_role = client.post(
+        "/api/v1/admin/approval-rules",
+        headers=admin,
+        json={
+            "code": "tenant-check-valid",
+            "name": "Valid system-role approver",
+            "effective_from": "2026-10-28",
+            "steps": [
+                {
+                    "step_order": 1,
+                    "approver_type": "role",
+                    "approver_role_id": str(global_role.id),
+                }
+            ],
+        },
+    )
+    assert valid_role.status_code == 201, valid_role.text
+
+    foreign_approvers = (
+        ("user", "approver_user_id", str(outsider["user_id"])),
+        ("role", "approver_role_id", str(outsider_role.id)),
+    )
+    for index, (approver_type, field, value) in enumerate(foreign_approvers):
+        response = client.post(
+            "/api/v1/admin/approval-rules",
+            headers=admin,
+            json={
+                "code": f"tenant-check-invalid-{index}",
+                "name": "Cross-tenant approver",
+                "effective_from": "2026-10-28",
+                "steps": [{"step_order": 1, "approver_type": approver_type, field: value}],
+            },
+        )
+        assert response.status_code == 404, response.text
+        assert response.json()["error"]["code"] == "not_found"

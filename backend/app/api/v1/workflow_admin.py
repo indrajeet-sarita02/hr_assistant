@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime
 
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import DbSession, require_internal_permission
@@ -19,6 +19,7 @@ from app.db.models import (
     LegalHold,
     ReminderRule,
     Role,
+    TenantMembership,
     User,
 )
 from app.domains.audit import write_audit
@@ -154,12 +155,35 @@ def _validate_steps(db: Session, tenant_id: uuid.UUID, steps: list[ApprovalStepI
         if step.approver_type not in {"manager", "role", "user"}:
             raise AppError(422, "validation_error", "errors.validation", "Invalid approver type.")
         if step.approver_type == "role":
-            role = db.get(Role, step.approver_role_id) if step.approver_role_id else None
-            if role is None:
+            role_id = (
+                db.scalar(
+                    select(Role.id).where(
+                        Role.id == step.approver_role_id,
+                        or_(Role.tenant_id.is_(None), Role.tenant_id == tenant_id),
+                    )
+                )
+                if step.approver_role_id
+                else None
+            )
+            if role_id is None:
                 raise not_found("approver role")
         if step.approver_type == "user":
-            user = db.get(User, step.approver_user_id) if step.approver_user_id else None
-            if user is None:
+            user_id = (
+                db.scalar(
+                    select(User.id)
+                    .join(TenantMembership, TenantMembership.user_id == User.id)
+                    .where(
+                        User.id == step.approver_user_id,
+                        User.user_type == "internal",
+                        User.status == "active",
+                        TenantMembership.tenant_id == tenant_id,
+                        TenantMembership.status == "active",
+                    )
+                )
+                if step.approver_user_id
+                else None
+            )
+            if user_id is None:
                 raise not_found("approver user")
 
 

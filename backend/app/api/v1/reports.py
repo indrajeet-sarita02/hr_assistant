@@ -18,7 +18,7 @@ from app.db.models import (
     OnboardingCase,
     ReportExport,
 )
-from app.domains.audit import write_audit
+from app.domains.audit import write_audit, write_outbox
 from app.domains.idempotency import begin, complete
 from app.domains.identity import Principal
 
@@ -182,6 +182,14 @@ def request_export(
     )
     db.add(item)
     db.flush()
+    write_outbox(
+        db,
+        principal.tenant_id,
+        "report.export.requested",
+        "report_export",
+        item.id,
+        {"report_type": item.report_type},
+    )
     write_audit(
         db,
         principal,
@@ -222,4 +230,13 @@ def get_export(
         and "report.export" not in principal.permissions
     ):
         raise forbidden("You cannot access this export.")
+    write_audit(
+        db,
+        principal,
+        "report.export.accessed",
+        target_type="report_export",
+        target_id=item.id,
+        metadata={"status": item.status},
+    )
+    db.commit()
     return ExportOut.model_validate(item)

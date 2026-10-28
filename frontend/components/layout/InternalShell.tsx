@@ -11,6 +11,7 @@ import {
   X,
 } from "lucide-react";
 
+import { useToast } from "@/components/feedback/ToastProvider";
 import { LanguageSwitcher } from "@/components/layout/LanguageSwitcher";
 import { useI18n } from "@/components/layout/LocaleProvider";
 import { Logo } from "@/components/layout/Logo";
@@ -18,7 +19,7 @@ import { useSession } from "@/components/layout/SessionProvider";
 import { SkipLink } from "@/components/layout/SkipLink";
 import { ErrorPanel } from "@/components/ui/ErrorPanel";
 import { LoadingPanel } from "@/components/ui/States";
-import { apiGet } from "@/lib/api-client";
+import { apiGet, errorMessage } from "@/lib/api-client";
 import { humanize, initials } from "@/lib/format";
 import { pageForPath, visibleGroups, visibleItems } from "@/lib/nav";
 import { hasPermission, permissions } from "@/lib/permissions";
@@ -30,12 +31,13 @@ function navIsActive(localPath: string, href: string): boolean {
 
 export function InternalShell({ children }: { children: React.ReactNode }) {
   const { locale, t } = useI18n();
+  const { notify } = useToast();
   const { me, status, error, logout, refresh } = useSession();
   const pathname = usePathname();
   const router = useRouter();
   const [moreOpen, setMoreOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
-  const [unread, setUnread] = useState(0);
+  const [unread, setUnread] = useState<number | null>(null);
   const moreRef = useRef<HTMLDivElement>(null);
   const morePreviousFocus = useRef<HTMLElement | null>(null);
 
@@ -116,7 +118,7 @@ export function InternalShell({ children }: { children: React.ReactNode }) {
       status !== "authenticated" ||
       !hasPermission(me?.permissions, permissions.notificationRead)
     ) {
-      setUnread(0);
+      setUnread(null);
       return;
     }
     let active = true;
@@ -124,13 +126,15 @@ export function InternalShell({ children }: { children: React.ReactNode }) {
       .then((page) => {
         if (active) setUnread(page.total);
       })
-      .catch(() => {
-        if (active) setUnread(0);
+      .catch((caught: unknown) => {
+        if (!active) return;
+        setUnread(null);
+        notify(errorMessage(caught, t), "error");
       });
     return () => {
       active = false;
     };
-  }, [status, me?.user.id, me?.permissions]);
+  }, [status, me?.user.id, me?.permissions, notify, t]);
 
   async function handleSignOut() {
     setSigningOut(true);
@@ -193,7 +197,9 @@ export function InternalShell({ children }: { children: React.ReactNode }) {
                   >
                     <Icon aria-hidden="true" />
                     <span>{t(item.key)}</span>
-                    {item.href === "/notifications" && unread > 0 && (
+                    {item.href === "/notifications" &&
+                      unread !== null &&
+                      unread > 0 && (
                       <span className="nav-badge">{unread > 9 ? "9+" : unread}</span>
                     )}
                   </Link>
@@ -248,13 +254,13 @@ export function InternalShell({ children }: { children: React.ReactNode }) {
                   className="notification-button"
                   href={`/${locale}/notifications`}
                   aria-label={
-                    unread > 0
+                    unread !== null && unread > 0
                       ? t("nav.notifications_unread", { count: unread })
                       : t("nav.notifications")
                   }
                 >
                   <Bell size={17} aria-hidden="true" />
-                  {unread > 0 && (
+                  {unread !== null && unread > 0 && (
                     <span className="notification-dot" aria-hidden="true">
                       {unread > 9 ? "9+" : unread}
                     </span>
