@@ -253,7 +253,11 @@ const en = {
   "auth.access_denied_title": "Internal account required",
   "auth.access_denied_body": "You are signed in, but this account does not have access to the internal HR workspace.",
   "auth.session_expired_title": "Session expired",
-  "auth.session_expired_body": "For your security, sign in again to continue. Your browsing context is preserved where possible.",
+  "auth.session_expired_body":
+    "For your security, sign in again to continue. Your browsing context is preserved where possible.",
+  "auth.sign_out_title": "You are signed out",
+  "auth.sign_out_body":
+    "Your session has been cleared on this device. Any unsaved work was discarded.",
   "auth.back_home": "Back to career home",
   "auth.demo_only": "Demo credentials are for local evaluation only. Remove or rotate them before production.",
   "auth.create_account": "Create account",
@@ -1144,7 +1148,11 @@ const hi: Record<MessageKey, string> = {
   "auth.access_denied_title": "आंतरिक खाता आवश्यक",
   "auth.access_denied_body": "आप साइन इन हैं, लेकिन इस खाते के पास आंतरिक HR कार्यक्षेत्र की पहुँच नहीं है।",
   "auth.session_expired_title": "सत्र समाप्त",
-  "auth.session_expired_body": "सुरक्षा के लिए, जारी रखने हेतु पुनः साइन इन करें। जहाँ संभव हो ब्राउज़िंग संदर्भ सुरक्षित रहेगा।",
+  "auth.session_expired_body":
+    "सुरक्षा के लिए, जारी रखने हेतु पुनः साइन इन करें। जहाँ संभव हो ब्राउज़िंग संदर्भ सुरक्षित रहेगा।",
+  "auth.sign_out_title": "आप साइन आउट हो चुके हैं",
+  "auth.sign_out_body":
+    "इस डिवाइस से आपका सत्र हटा दिया गया है। सहेजा न गया कार्य त्यागा गया था।",
   "auth.back_home": "करियर होम पर वापस",
   "auth.demo_only": "डेमो क्रेडेंशियल केवल स्थानीय परीक्षण के लिए हैं। उत्पादन से पहले इन्हें हटाएँ या बदलें।",
   "auth.create_account": "खाता बनाएँ",
@@ -1799,6 +1807,24 @@ export const messages: Record<Locale, Record<MessageKey, string>> = {
   hi,
 };
 
+/**
+ * Translation-gap registry (Frontend.md §5.2).
+ *
+ * A missing key must never reach end users: the lookup falls back to English,
+ * then to a safe generic message. The missing key is recorded here so a CI
+ * check or review tooling can flag it for translation owners. Registered keys
+ * are stable, non-PII values only.
+ */
+const missingTranslations = new Set<string>();
+
+export function missingTranslationKeys(): string[] {
+  return [...missingTranslations].sort();
+}
+
+export function resetMissingTranslations(): void {
+  missingTranslations.clear();
+}
+
 export function interpolate(
   message: string,
   vars?: Record<string, string | number>,
@@ -1810,6 +1836,9 @@ export function interpolate(
   });
 }
 
+// Frontend.md §5.2: renders translated text from stable backend codes and never
+// shows the raw key itself to end users. Lookup order: requested locale →
+// English → safe generic text. The gap is registered for translation review.
 export function translate(
   locale: Locale,
   key: string,
@@ -1817,7 +1846,11 @@ export function translate(
 ): string {
   const localeMessages = messages[locale] as Record<string, string>;
   const fallback = messages.en as Record<string, string>;
-  const template = localeMessages[key] ?? fallback[key] ?? key;
+  const template = localeMessages[key] ?? fallback[key];
+  if (template === undefined) {
+    missingTranslations.add(`${locale}:${key}`);
+    return "";
+  }
   return interpolate(template, vars);
 }
 

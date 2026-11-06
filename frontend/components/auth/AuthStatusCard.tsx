@@ -11,13 +11,22 @@ export function AuthStatusCard({
   kind,
   next,
 }: {
-  kind: "access-denied" | "session-expired";
+  kind: "access-denied" | "session-expired" | "sign-out";
   next?: string;
 }) {
   const { locale, t } = useI18n();
-  const isDenied = kind === "access-denied";
-  const title = isDenied ? t("auth.access_denied_title") : t("auth.session_expired_title");
-  const body = isDenied ? t("auth.access_denied_body") : t("auth.session_expired_body");
+  const title =
+    kind === "access-denied"
+      ? t("auth.access_denied_title")
+      : kind === "sign-out"
+        ? t("auth.sign_out_title")
+        : t("auth.session_expired_title");
+  const body =
+    kind === "access-denied"
+      ? t("auth.access_denied_body")
+      : kind === "sign-out"
+        ? t("auth.sign_out_body")
+        : t("auth.session_expired_body");
   const signInHref = `/${locale}/sign-in${next ? `?next=${encodeURIComponent(next)}` : ""}`;
 
   return (

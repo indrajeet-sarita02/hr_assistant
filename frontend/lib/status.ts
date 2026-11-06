@@ -61,9 +61,9 @@ export function statusTone(status: string): StatusTone {
 }
 
 export function statusLabel(t: Translator, status: string): string {
-  const key = `status.${status}`;
-  const label = t(key);
-  return label === key ? t("status.unknown") : label;
+  const label = t(`status.${status}`);
+  // A missing key renders as an empty string; never expose the raw key.
+  return label || t("status.unknown");
 }
 
 const labelToStatus: Record<string, string> = {};

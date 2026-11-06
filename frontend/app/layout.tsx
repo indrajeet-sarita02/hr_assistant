@@ -1,7 +1,13 @@
 import type { Metadata } from "next";
 import "./globals.css";
 
+// Frontend.md §5.1: localized public pages emit hreflang alternates; a
+// configurable metadata base keeps absolute OG/Twitter URLs deployment-correct
+// instead of falling back to localhost.
 export const metadata: Metadata = {
+  metadataBase: new URL(
+    process.env.NEXT_PUBLIC_SITE_URL || "https://localhost:3000"
+  ),
   title: {
     default: "HR Assist",
     template: "%s · HR Assist",

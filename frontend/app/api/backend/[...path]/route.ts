@@ -44,9 +44,6 @@ function sameOrigin(request: NextRequest): boolean {
 }
 
 async function proxy(request: NextRequest, path: string[], accessToken?: string) {
-  const target = `/api/backend/${path.map(encodeURIComponent).join("/")}`;
-  void target;
-
   const headers = new Headers();
   for (const name of [
     "content-type",

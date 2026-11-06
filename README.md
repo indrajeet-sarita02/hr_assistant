@@ -92,6 +92,13 @@ cd frontend
 npm run typecheck
 ```
 
+Run frontend unit/component tests (Frontend.md §11):
+
+```bash
+cd frontend
+npm test
+```
+
 ## Project documentation
 
 - [Frontend engineering guide](./Frontend.md)

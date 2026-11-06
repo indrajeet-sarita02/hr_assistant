@@ -18,6 +18,7 @@ import { LanguageSwitcher } from "@/components/layout/LanguageSwitcher";
 import { useI18n } from "@/components/layout/LocaleProvider";
 import { Logo } from "@/components/layout/Logo";
 import { useSession } from "@/components/layout/SessionProvider";
+import { logoutRequest } from "@/lib/session-client";
 
 const publicLinks = [
   { href: "", label: "nav.home", icon: PenLine },
@@ -154,12 +155,13 @@ export function PublicHeader() {
                   type="button"
                   className="btn btn-ghost btn-sm"
                   onClick={async () => {
-                    await fetch("/api/session/logout", {
-                      method: "POST",
-                      credentials: "same-origin",
-                    });
+                    try {
+                      await logoutRequest();
+                    } catch {
+                      // Local cookie cleanup must not depend on the backend.
+                    }
                     setOpen(false);
-                    router.push(`/${locale}`);
+                    router.push(`/${locale}/sign-out`);
                     router.refresh();
                   }}
                 >

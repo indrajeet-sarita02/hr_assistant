@@ -11,6 +11,7 @@ import {
 } from "react";
 
 import { ApiError, apiGet } from "@/lib/api-client";
+import { loginRequest, logoutRequest, registerRequest } from "@/lib/session-client";
 import type { Me } from "@/lib/types";
 
 type SessionStatus = "loading" | "authenticated" | "unauthenticated" | "error";
@@ -95,24 +96,7 @@ export function SessionProvider({
   }, []);
 
   const login = useCallback(async (email: string, password: string) => {
-    const response = await fetch("/api/session/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ email, password }),
-      credentials: "same-origin",
-      cache: "no-store",
-    });
-
-    if (!response.ok) {
-      let envelope = null;
-      try {
-        envelope = await response.json();
-      } catch {
-        envelope = null;
-      }
-      throw new ApiError(response.status, envelope);
-    }
-
+    await loginRequest(email, password);
     const current = await loadMe();
     setMe(current);
     setStatus("authenticated");
@@ -127,27 +111,7 @@ export function SessionProvider({
       full_name: string;
       locale: string;
     }) => {
-      const response = await fetch("/api/session/register", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify(payload),
-        credentials: "same-origin",
-        cache: "no-store",
-      });
-
-      if (!response.ok) {
-        let envelope = null;
-        try {
-          envelope = await response.json();
-        } catch {
-          envelope = null;
-        }
-        throw new ApiError(response.status, envelope);
-      }
-
+      await registerRequest(payload);
       const current = await loadMe();
       setMe(current);
       setStatus("authenticated");
@@ -159,11 +123,7 @@ export function SessionProvider({
 
   const logout = useCallback(async () => {
     try {
-      await fetch("/api/session/logout", {
-        method: "POST",
-        credentials: "same-origin",
-        cache: "no-store",
-      });
+      await logoutRequest();
     } finally {
       setMe(null);
       setStatus("unauthenticated");

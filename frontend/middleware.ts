@@ -34,12 +34,46 @@ function preferredLocale(request: NextRequest): string {
   return "en";
 }
 
+// Coarse route hygiene (Frontend.md §6.2): internal workspace routes require an
+// internal session. Middleware only checks that a session cookie pair exists —
+// the API still authorizes every request server-side. Signed-in users whose
+// session is stale land on the client-side redirect in InternalShell.
+const internalSegments = new Set([
+  "dashboard",
+  "assistant",
+  "requests",
+  "leave",
+  "notifications",
+  "onboarding",
+  "recruitment",
+  "resume",
+  "reports",
+  "audit",
+  "editorial",
+  "admin",
+]);
+
+function hasSessionCookie(request: NextRequest): boolean {
+  return request.cookies.has("hr_access") || request.cookies.has("hr_refresh");
+}
+
+function internalPath(rest: string): string | null {
+  const segment = rest.split("/")[1];
+  return segment && internalSegments.has(segment) ? segment : null;
+}
+
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const firstSegment = pathname.split("/")[1];
 
   if (locales.includes(firstSegment as (typeof locales)[number])) {
     const rest = pathname.slice(firstSegment.length + 1) || "/";
+    if (internalPath(rest) && !hasSessionCookie(request)) {
+      const url = request.nextUrl.clone();
+      url.pathname = `/${firstSegment}/sign-in`;
+      url.search = `?next=${encodeURIComponent(pathname)}`;
+      return NextResponse.redirect(url);
+    }
     const target = aliasRoutes[rest];
     if (target) {
       const url = request.nextUrl.clone();
@@ -53,9 +87,16 @@ export function middleware(request: NextRequest) {
 
   const locale = preferredLocale(request);
   const url = request.nextUrl.clone();
+  const internal = internalPath(`/${pathname === "/" ? "" : pathname}`);
+  if (internal && !hasSessionCookie(request)) {
+    url.pathname = `/${locale}/sign-in`;
+    url.search = `?next=${encodeURIComponent(`/${locale}${pathname}`)}`;
+    return NextResponse.redirect(url);
+  }
   url.pathname = `/${locale}${pathname === "/" ? "" : pathname}`;
   return NextResponse.redirect(url);
 }
+
 
 export const config = {
   matcher: ["/((?!api|_next/static|_next/image|favicon.ico|.*\\..*).*)"],

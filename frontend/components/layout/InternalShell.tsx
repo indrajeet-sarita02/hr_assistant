@@ -140,7 +140,7 @@ export function InternalShell({ children }: { children: React.ReactNode }) {
     setSigningOut(true);
     try {
       await logout();
-      router.replace(`/${locale}`);
+      router.replace(`/${locale}/sign-out`);
       router.refresh();
     } finally {
       setSigningOut(false);
