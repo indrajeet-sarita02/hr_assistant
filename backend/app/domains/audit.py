@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.core.logging import request_id_ctx
+from app.core.logging import ip_hash_ctx, request_id_ctx, user_agent_hash_ctx
 from app.db.models import AuditEvent, OutboxEvent
 from app.domains.identity import Principal
 
@@ -32,6 +32,8 @@ def write_audit(
         outcome=outcome,
         correlation_id=request_id_ctx.get(),
         request_id=request_id_ctx.get(),
+        ip_hash=ip_hash_ctx.get(),
+        user_agent_hash=user_agent_hash_ctx.get(),
         metadata_json=metadata or {},
         occurred_at=datetime.now(UTC),
     )

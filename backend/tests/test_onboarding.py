@@ -5,6 +5,7 @@ import hashlib
 from sqlalchemy import func, select
 
 from app.db.models import (
+    Department,
     EmployeeProfile,
     IdempotencyKey,
     OnboardingCase,
@@ -240,6 +241,58 @@ def test_template_without_case_can_be_rewritten(client, login, db):
     assert updated.status_code == 200, updated.text
     assert updated.json()["tasks"][0]["required_evidence"] is True
     assert template is not None
+
+
+def test_template_task_applicability_filters_case_tasks(client, login, db):
+    hr = login("hr@example.com")
+    eng = db.scalar(select(Department).where(Department.code == "ENG"))
+    peo = db.scalar(select(Department).where(Department.code == "PEO"))
+    created = client.post(
+        "/api/v1/onboarding/templates",
+        headers=hr,
+        json={
+            "name": "Applicability onboarding",
+            "tasks": [
+                {
+                    "title": "Engineering-only task",
+                    "owner_rule": "employee",
+                    "position": 1,
+                    "applicability": {"department_ids": [str(eng.id)]},
+                },
+                {
+                    "title": "People-team-only task",
+                    "owner_rule": "hr",
+                    "position": 2,
+                    "applicability": {"department_ids": [str(peo.id)]},
+                },
+                {
+                    "title": "Everyone task",
+                    "owner_rule": "employee",
+                    "position": 3,
+                },
+            ],
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    case = client.post(
+        "/api/v1/onboarding/cases",
+        headers={**hr, "Idempotency-Key": "applicability-case"},
+        json={
+            "employee_id": _employee_id(db, "employee@example.com"),
+            "template_id": created.json()["id"],
+            "start_date": "2027-01-04",
+        },
+    )
+    assert case.status_code == 201, case.text
+    tasks = list(
+        db.scalars(
+            select(OnboardingTask)
+            .where(OnboardingTask.case_id == case.json()["id"])
+            .order_by(OnboardingTask.position)
+        )
+    )
+    assert [task.title for task in tasks] == ["Engineering-only task", "Everyone task"]
 
 
 def test_template_detail_is_tenant_scoped(client, login):

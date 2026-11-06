@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 
-from app.api.deps import DbSession, get_principal
+from app.api.deps import DbSession, get_principal, write_rate_limit
 from app.api.pagination import count_rows
 from app.api.v1.schemas.common import ORMModel, Page
 from app.core.config import settings
@@ -153,6 +153,7 @@ def register_document(
     payload: DocumentRegisterIn,
     db: DbSession,
     principal: Principal = Depends(get_principal),
+    _: None = Depends(write_rate_limit),
 ) -> DocumentOut:
     if not _can_upload(principal):
         raise forbidden("Document upload is not enabled for this account.")

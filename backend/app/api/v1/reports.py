@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Header, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from app.api.deps import DbSession, require_internal_permission
+from app.api.deps import DbSession, require_internal_permission, write_rate_limit
 from app.api.v1.schemas.common import ORMModel
 from app.core.errors import AppError, forbidden, not_found
 from app.db.models import (
@@ -124,6 +124,7 @@ def request_export(
     idempotency_key: IdempotencyHeader,
     db: DbSession,
     principal: Principal = Depends(require_internal_permission("report.export")),
+    _: None = Depends(write_rate_limit),
 ) -> ExportOut:
     state = begin(
         db,

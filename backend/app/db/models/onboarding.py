@@ -17,6 +17,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TimestampMixin, VersionMixin, new_uuid
@@ -84,6 +85,7 @@ class OnboardingTemplateTask(Base):
     owner_rule: Mapped[str] = mapped_column(String(20), default="employee", nullable=False)
     due_offset_days: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     required_evidence: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    applicability: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     position: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     __table_args__ = (
         CheckConstraint("owner_rule IN ('employee','manager','hr')", name="owner_rule"),

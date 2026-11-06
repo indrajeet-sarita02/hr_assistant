@@ -941,25 +941,53 @@ def _ensure_mock_test(db: Session) -> None:
 def _ensure_notifications(
     db: Session, org: Organization, employees: dict[str, EmployeeProfile], users: dict[str, User]
 ) -> None:
-    template = db.scalar(
-        select(NotificationTemplate).where(
-            NotificationTemplate.code == "leave.status_changed",
-            NotificationTemplate.locale == "en",
-            NotificationTemplate.version == 1,
-        )
-    )
-    if template is None:
-        db.add(
-            NotificationTemplate(
-                code="leave.status_changed",
-                locale="en",
-                version=1,
-                channel="in_app",
-                subject="Leave request updated",
-                body="Your leave request status changed to {{status}}.",
-                review_status="approved",
+    templates = [
+        (
+            "leave.status_changed",
+            "Leave request updated",
+            "Your leave request status changed to {{status}}.",
+        ),
+        (
+            "leave.approval_requested",
+            "Leave request awaiting decision",
+            "A leave request needs your review.",
+        ),
+        (
+            "service_request.status_changed",
+            "HR request updated",
+            "Your HR request status changed to {{status}}.",
+        ),
+        (
+            "onboarding.case_created",
+            "Onboarding started",
+            "Your onboarding plan is ready.",
+        ),
+        (
+            "interview.scheduled",
+            "Interview scheduled",
+            "An interview has been scheduled and you are invited.",
+        ),
+    ]
+    for code, subject, body in templates:
+        template = db.scalar(
+            select(NotificationTemplate).where(
+                NotificationTemplate.code == code,
+                NotificationTemplate.locale == "en",
+                NotificationTemplate.version == 1,
             )
         )
+        if template is None:
+            db.add(
+                NotificationTemplate(
+                    code=code,
+                    locale="en",
+                    version=1,
+                    channel="in_app",
+                    subject=subject,
+                    body=body,
+                    review_status="approved",
+                )
+            )
     recipient = users["employee"]
     existing = db.scalar(
         select(Notification).where(

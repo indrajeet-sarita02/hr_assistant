@@ -5,12 +5,13 @@ from datetime import UTC, date, datetime
 
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.api.deps import (
     DbSession,
     require_any_internal_permission,
     require_internal_permission,
+    write_rate_limit,
 )
 from app.api.pagination import count_rows
 from app.api.v1.schemas.common import ORMModel, Page
@@ -433,6 +434,7 @@ def create_application(
     principal: Principal = Depends(
         require_internal_permission("recruitment.application.create")
     ),
+    _: None = Depends(write_rate_limit),
 ) -> ApplicationOut:
     requisition = db.scalar(
         select(Requisition).where(
@@ -475,15 +477,43 @@ def create_application(
     if existing is not None:
         raise AppError(409, "conflict", "errors.conflict", "An application already exists.")
     now = datetime.now(UTC)
+    if payload.lawful_basis not in {
+        "consent",
+        "legitimate_interest",
+        "contract",
+        "legal_obligation",
+    }:
+        raise AppError(422, "validation_error", "errors.validation", "Invalid lawful basis.")
     if payload.privacy_notice_version_id:
         notice = db.scalar(
             select(PrivacyNoticeVersion).where(
                 PrivacyNoticeVersion.id == payload.privacy_notice_version_id,
+                or_(
+                    PrivacyNoticeVersion.tenant_id == principal.tenant_id,
+                    PrivacyNoticeVersion.tenant_id.is_(None),
+                ),
                 PrivacyNoticeVersion.effective_from <= date.today(),
             )
         )
-        if notice is None:
-            raise not_found("privacy notice")
+    else:
+        # The notice shown to the candidate must be recorded even when the
+        # caller does not pin a version explicitly.
+        notice = db.scalar(
+            select(PrivacyNoticeVersion)
+            .where(
+                or_(
+                    PrivacyNoticeVersion.tenant_id == principal.tenant_id,
+                    PrivacyNoticeVersion.tenant_id.is_(None),
+                ),
+                PrivacyNoticeVersion.code == "candidate_privacy",
+                PrivacyNoticeVersion.effective_from <= date.today(),
+            )
+            .order_by(PrivacyNoticeVersion.effective_from.desc())
+            .limit(1)
+        )
+    if payload.privacy_notice_version_id and notice is None:
+        raise not_found("privacy notice")
+    if notice is not None:
         db.add(
             CandidateConsent(
                 tenant_id=principal.tenant_id,

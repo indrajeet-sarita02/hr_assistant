@@ -10,6 +10,8 @@ from typing import Any
 request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
 tenant_id_ctx: ContextVar[str] = ContextVar("tenant_id", default="-")
 user_id_ctx: ContextVar[str] = ContextVar("user_id", default="-")
+ip_hash_ctx: ContextVar[str | None] = ContextVar("ip_hash", default=None)
+user_agent_hash_ctx: ContextVar[str | None] = ContextVar("user_agent_hash", default=None)
 
 
 class JsonFormatter(logging.Formatter):

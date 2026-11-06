@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import select
 
 from app.db.models import (
+    ApprovalRule,
+    ApprovalRuleStep,
     EmployeeProfile,
     IdempotencyKey,
     LeaveBalance,
     LeaveType,
+    Organization,
     User,
 )
 
@@ -228,3 +232,80 @@ def test_leave_scope_filters(client, login):
     assert created.json()["id"] in {
         item["id"] for item in approvals.json()["items"]
     }
+
+
+def test_leave_routes_to_configured_approval_rule(client, login, db):
+    employee = login("employee@example.com")
+    hr_user = db.scalar(select(User).where(User.email == "hr@example.com"))
+    tenant = db.scalar(select(Organization))
+    rule = ApprovalRule(
+        tenant_id=tenant.id,
+        code="LEAVE_HR_OVERRIDE",
+        name="Route leave to HR",
+        entity_type="leave_request",
+        active=True,
+        effective_from=date.today(),
+    )
+    db.add(rule)
+    db.flush()
+    db.add(
+        ApprovalRuleStep(
+            rule_id=rule.id,
+            step_order=1,
+            approver_type="user",
+            approver_user_id=hr_user.id,
+        )
+    )
+    db.commit()
+
+    created = client.post(
+        "/api/v1/leave/requests",
+        headers={**employee, "Idempotency-Key": "leave-rule-approver"},
+        json={
+            "leave_type_id": _leave_type(client, employee),
+            "start_at": "2026-12-21T00:00:00+05:30",
+            "end_at": "2026-12-22T00:00:00+05:30",
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["current_approver_user_id"] == str(hr_user.id)
+
+
+def test_hr_can_adjust_balance_and_employee_cannot(client, login, db):
+    employee = login("employee@example.com")
+    hr = login("hr@example.com")
+    leave_type_id = _leave_type(client, employee)
+    balance = _balance(db, leave_type_id)
+    original = balance.entitled
+    original_version = balance.version
+
+    denied = client.post(
+        f"/api/v1/leave/balances/{balance.id}/adjust",
+        headers=employee,
+        json={"entitled_delta": "1.00", "reason": "Employee cannot self-adjust"},
+    )
+    assert denied.status_code == 403
+
+    adjusted = client.post(
+        f"/api/v1/leave/balances/{balance.id}/adjust",
+        headers=hr,
+        json={
+            "entitled_delta": "2.00",
+            "reason": "Annual entitlement correction",
+            "version": original_version,
+        },
+    )
+    assert adjusted.status_code == 200, adjusted.text
+    assert Decimal(adjusted.json()["entitled"]) == original + Decimal("2.00")
+
+    stale = client.post(
+        f"/api/v1/leave/balances/{balance.id}/adjust",
+        headers=hr,
+        json={
+            "entitled_delta": "1.00",
+            "reason": "Stale update",
+            "version": original_version,
+        },
+    )
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "stale_version"

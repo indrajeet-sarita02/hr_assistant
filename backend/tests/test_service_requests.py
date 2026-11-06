@@ -226,3 +226,47 @@ def test_service_request_scope_filters(client, login):
         "/api/v1/service-requests?scope=queue", headers=employee
     )
     assert forbidden_queue.status_code == 403
+
+
+def test_service_request_update_is_limited_to_assigned_hr(client, login):
+    employee = login("employee@example.com")
+    hr = login("hr@example.com")
+    second_hr_user = create_tenant_user(
+        email="hr2@example.com",
+        role_code="hr_executive",
+        tenant_slug="demo",
+        with_employee=True,
+    )
+    second_hr = login("hr2@example.com")
+    request_id = client.post(
+        "/api/v1/service-requests",
+        headers={**employee, "Idempotency-Key": "assigned-scope-request"},
+        json={
+            "catalog_item_id": _catalog_item(client, employee),
+            "form_data": {"topic": "Assignment scope"},
+            "subject": "Assignment scope",
+            "description": "Only the assigned HR user should update this.",
+        },
+    ).json()["id"]
+
+    assigned = client.patch(
+        f"/api/v1/service-requests/{request_id}",
+        headers=hr,
+        json={"assignee_user_id": str(second_hr_user["user_id"])},
+    )
+    assert assigned.status_code == 200, assigned.text
+
+    assigned_update = client.patch(
+        f"/api/v1/service-requests/{request_id}",
+        headers=second_hr,
+        json={"priority": "high"},
+    )
+    assert assigned_update.status_code == 200, assigned_update.text
+
+    other_update = client.patch(
+        f"/api/v1/service-requests/{request_id}",
+        headers=hr,
+        json={"priority": "urgent"},
+    )
+    assert other_update.status_code == 403
+    assert "another user" in other_update.json()["error"]["message"]

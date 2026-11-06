@@ -13,6 +13,7 @@ from app.api.deps import (
     DbSession,
     get_principal,
     require_internal_permission,
+    write_rate_limit,
 )
 from app.api.pagination import count_rows
 from app.api.v1.schemas.common import ORMModel, Page
@@ -138,6 +139,20 @@ def _load_request(db: Session, principal: Principal, request_id: uuid.UUID) -> H
     return item
 
 
+def _require_update_scope(item: HRServiceRequest, principal: Principal) -> None:
+    """Enforce the ``update_assigned`` scope: assigned requests only.
+
+    Requesters keep access to their own request for comments and attachments.
+    Queue staff may claim an unassigned request, but must not modify a request
+    that is assigned to another user.
+    """
+
+    if item.requester_user_id == principal.user_id:
+        return
+    if item.assignee_user_id is not None and item.assignee_user_id != principal.user_id:
+        raise forbidden("This service request is assigned to another user.")
+
+
 @router.get("/service-catalog", response_model=list[CatalogOut])
 def list_catalog(
     db: DbSession,
@@ -228,6 +243,7 @@ def create_request(
     idempotency_key: IdempotencyHeader,
     db: DbSession,
     principal: Principal = Depends(require_internal_permission("service_request.create")),
+    _: None = Depends(write_rate_limit),
 ) -> ServiceRequestOut:
     state = begin(
         db,
@@ -330,7 +346,11 @@ def update_request(
     ),
 ) -> ServiceRequestOut:
     item = _load_request(db, principal, request_id)
+    _require_update_scope(item, principal)
     now = datetime.now(UTC)
+    previous_assignee = item.assignee_user_id
+    previous_status = item.status
+    closed_now = False
     if payload.status is not None:
         if payload.status not in VALID_STATUS:
             raise AppError(422, "validation_error", "errors.validation", "Invalid status.")
@@ -341,6 +361,7 @@ def update_request(
             item.resolved_at = now
         elif payload.status == "closed":
             item.closed_at = now
+            closed_now = True
     if payload.assignee_user_id is not None:
         membership = db.scalar(
             select(TenantMembership).where(
@@ -372,6 +393,25 @@ def update_request(
         target_id=item.id,
         metadata={"status": item.status},
     )
+    if payload.assignee_user_id is not None and item.assignee_user_id != previous_assignee:
+        # §8.14: assignment is separately queryable from generic status changes.
+        write_audit(
+            db,
+            principal,
+            "service_request.assigned",
+            target_type="hr_service_request",
+            target_id=item.id,
+            metadata={"assignee_user_id": str(payload.assignee_user_id)},
+        )
+    if closed_now and previous_status != "closed":
+        write_audit(
+            db,
+            principal,
+            "service_request.closed",
+            target_type="hr_service_request",
+            target_id=item.id,
+            metadata={"closed_at": now.isoformat()},
+        )
     write_outbox(
         db,
         principal.tenant_id,
@@ -423,6 +463,7 @@ def add_comment(
         "service_request.update_assigned" not in principal.permissions
     ):
         raise forbidden("You cannot comment on this request.")
+    _require_update_scope(item, principal)
     comment = HRServiceRequestComment(
         tenant_id=principal.tenant_id,
         request_id=item.id,
@@ -461,6 +502,7 @@ def add_attachment(
         and "service_request.update_assigned" not in principal.permissions
     ):
         raise forbidden("You cannot attach documents to this request.")
+    _require_update_scope(item, principal)
     document = db.scalar(
         select(Document).where(
             Document.id == payload.document_id,
@@ -473,7 +515,16 @@ def add_attachment(
         "service_request.update_assigned" not in principal.permissions
     ):
         raise forbidden("You cannot attach another user's document.")
-    if document.scan_status in {"infected", "failed"}:
+    if document.scan_status != "clean":
+        # Never attach unscanned or quarantined documents to a service
+        # request (§10.3: never serve unscanned files).
+        if document.scan_status == "pending":
+            raise AppError(
+                422,
+                "business_rule_violation",
+                "documents.errors.scan_pending",
+                "This document is not available until security scanning completes.",
+            )
         raise AppError(
             422,
             "business_rule_violation",

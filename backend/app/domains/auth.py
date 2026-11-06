@@ -18,6 +18,7 @@ from app.core.security import (
     token_hash,
     verify_password,
 )
+from app.domains.audit import write_audit
 from app.db.models import User, UserSession
 
 _DUMMY_PASSWORD_HASH = hash_password("timing-equalisation-not-a-real-password")
@@ -137,6 +138,14 @@ def refresh_session(db: Session, refresh_token: str) -> tuple[User, TokenPair, U
         # A rotated or replayed refresh token revokes the session family.
         session.revoked_at = now
         db.add(session)
+        write_audit(
+            db,
+            None,
+            "session.revoked",
+            target_type="session",
+            target_id=session.id,
+            metadata={"reason": "refresh_reuse", "user_id": str(user.id)},
+        )
         raise unauthenticated("The refresh token was already used or is invalid.")
     if payload.get("aud") != audience_for_user_type(user.user_type):
         raise unauthenticated("The refresh token audience is invalid.")

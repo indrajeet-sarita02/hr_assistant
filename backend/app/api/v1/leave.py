@@ -11,11 +11,18 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
-from app.api.deps import DbSession, get_principal, require_internal_permission
+from app.api.deps import (
+    DbSession,
+    get_principal,
+    require_internal_permission,
+    write_rate_limit,
+)
 from app.api.pagination import count_rows
 from app.api.v1.schemas.common import ORMModel, Page
 from app.core.errors import AppError, conflict, forbidden, invalid_state, not_found
 from app.db.models import (
+    ApprovalRule,
+    ApprovalRuleStep,
     EmployeeProfile,
     Holiday,
     HolidayCalendar,
@@ -55,6 +62,12 @@ class BalanceOut(ORMModel):
     consumed: Decimal
     pending: Decimal
     carried_forward: Decimal
+
+
+class BalanceAdjustIn(BaseModel):
+    entitled_delta: Decimal = Field(ge=Decimal("-365"), le=Decimal("365"))
+    reason: str = Field(min_length=3, max_length=1000)
+    version: int | None = Field(default=None, ge=1)
 
 
 class CalendarOut(BaseModel):
@@ -266,6 +279,86 @@ def _balance_for(
     )
 
 
+def _resolve_approver(
+    db: Session, tenant_id: uuid.UUID, employee: EmployeeProfile
+) -> uuid.UUID | None:
+    """Resolve the first applicable approver from the tenant's approval rules.
+
+    Steps are evaluated in order. A step that cannot be resolved (for example a
+    manager step for an employee without a manager) falls through to the next
+    step. If no configured rule can resolve an approver, the legacy fallbacks
+    (reporting manager, then any active approver) keep the workflow usable.
+    """
+
+    today = datetime.now(UTC).date()
+    rule = db.scalar(
+        select(ApprovalRule)
+        .where(
+            ApprovalRule.tenant_id == tenant_id,
+            ApprovalRule.entity_type == "leave_request",
+            ApprovalRule.active.is_(True),
+            ApprovalRule.effective_from <= today,
+        )
+        .order_by(ApprovalRule.effective_from.desc(), ApprovalRule.created_at.desc())
+        .limit(1)
+    )
+    if rule is not None:
+        steps = list(
+            db.scalars(
+                select(ApprovalRuleStep)
+                .where(ApprovalRuleStep.rule_id == rule.id)
+                .order_by(ApprovalRuleStep.step_order)
+            )
+        )
+        for step in steps:
+            if step.approver_type == "manager" and employee.manager_employee_id:
+                manager = db.get(EmployeeProfile, employee.manager_employee_id)
+                if manager is not None:
+                    return manager.user_id
+            elif step.approver_type == "user" and step.approver_user_id:
+                active = db.scalar(
+                    select(TenantMembership.id).where(
+                        TenantMembership.tenant_id == tenant_id,
+                        TenantMembership.user_id == step.approver_user_id,
+                        TenantMembership.status == "active",
+                    )
+                )
+                if active is not None:
+                    return step.approver_user_id
+            elif step.approver_type == "role" and step.approver_role_id:
+                approver = db.scalar(
+                    select(TenantMembership.user_id)
+                    .join(
+                        MembershipRole,
+                        MembershipRole.membership_id == TenantMembership.id,
+                    )
+                    .where(
+                        TenantMembership.tenant_id == tenant_id,
+                        TenantMembership.status == "active",
+                        MembershipRole.role_id == step.approver_role_id,
+                    )
+                    .limit(1)
+                )
+                if approver is not None:
+                    return approver
+
+    if employee.manager_employee_id:
+        manager = db.get(EmployeeProfile, employee.manager_employee_id)
+        if manager is not None:
+            return manager.user_id
+    return db.scalar(
+        select(TenantMembership.user_id)
+        .join(MembershipRole, MembershipRole.membership_id == TenantMembership.id)
+        .join(Role, Role.id == MembershipRole.role_id)
+        .where(
+            TenantMembership.tenant_id == tenant_id,
+            TenantMembership.status == "active",
+            Role.code == "approver",
+        )
+        .limit(1)
+    )
+
+
 @router.get("/types", response_model=list[LeaveTypeOut])
 def leave_types(
     db: DbSession,
@@ -285,8 +378,21 @@ def leave_types(
 def balances(
     db: DbSession,
     principal: Principal = Depends(require_internal_permission("leave.request.read_own")),
+    employee_id: uuid.UUID | None = None,
 ) -> list[BalanceOut]:
     employee = _employee_for_principal(db, principal)
+    if employee_id is not None and employee_id != employee.id:
+        if "leave.balance.adjust" not in principal.permissions:
+            raise forbidden("You can only view your own leave balances.")
+        target = db.scalar(
+            select(EmployeeProfile).where(
+                EmployeeProfile.id == employee_id,
+                EmployeeProfile.tenant_id == principal.tenant_id,
+            )
+        )
+        if target is None:
+            raise not_found("employee")
+        employee = target
     rows = list(
         db.scalars(
             select(LeaveBalance)
@@ -298,6 +404,74 @@ def balances(
         )
     )
     return [BalanceOut.model_validate(row) for row in rows]
+
+
+@router.post("/balances/{balance_id}/adjust", response_model=BalanceOut)
+def adjust_balance(
+    balance_id: uuid.UUID,
+    payload: BalanceAdjustIn,
+    db: DbSession,
+    principal: Principal = Depends(
+        require_internal_permission("leave.balance.adjust")
+    ),
+) -> BalanceOut:
+    balance = db.scalar(
+        select(LeaveBalance)
+        .where(
+            LeaveBalance.id == balance_id,
+            LeaveBalance.tenant_id == principal.tenant_id,
+        )
+        .with_for_update()
+    )
+    if balance is None:
+        raise not_found("leave balance")
+    if payload.version is not None and payload.version != balance.version:
+        raise AppError(
+            409,
+            "stale_version",
+            "errors.stale_version",
+            "The balance was changed by another user. Refresh and try again.",
+        )
+    before = {
+        "entitled": str(balance.entitled),
+        "carried_forward": str(balance.carried_forward),
+        "version": balance.version,
+    }
+    new_entitled = balance.entitled + payload.entitled_delta
+    if new_entitled < 0:
+        raise AppError(
+            422,
+            "business_rule_violation",
+            "leave.errors.balance_below_zero",
+            "The adjustment would make the entitlement negative.",
+        )
+    if new_entitled + balance.carried_forward < balance.consumed + balance.pending:
+        raise AppError(
+            422,
+            "business_rule_violation",
+            "leave.errors.balance_below_usage",
+            "The adjustment would make the balance lower than leave already used or reserved.",
+        )
+    balance.entitled = new_entitled
+    balance.version += 1
+    db.add(balance)
+    write_audit(
+        db,
+        principal,
+        "leave.balance.adjusted",
+        target_type="leave_balance",
+        target_id=balance.id,
+        metadata={
+            "before": before,
+            "after": {
+                "entitled": str(balance.entitled),
+                "version": balance.version,
+            },
+            "reason": payload.reason,
+        },
+    )
+    db.commit()
+    return BalanceOut.model_validate(balance)
 
 
 @router.get("/calendar", response_model=list[CalendarOut])
@@ -410,6 +584,7 @@ def create_request(
     idempotency_key: IdempotencyHeader,
     db: DbSession,
     principal: Principal = Depends(require_internal_permission("leave.request.create")),
+    _: None = Depends(write_rate_limit),
 ) -> LeaveRequestOut:
     state = begin(
         db,
@@ -505,23 +680,7 @@ def create_request(
             ],
         )
 
-    approver_user_id: uuid.UUID | None = None
-    if employee.manager_employee_id:
-        manager = db.get(EmployeeProfile, employee.manager_employee_id)
-        if manager:
-            approver_user_id = manager.user_id
-    if approver_user_id is None:
-        approver_user_id = db.scalar(
-            select(TenantMembership.user_id)
-            .join(MembershipRole, MembershipRole.membership_id == TenantMembership.id)
-            .join(Role, Role.id == MembershipRole.role_id)
-            .where(
-                TenantMembership.tenant_id == principal.tenant_id,
-                TenantMembership.status == "active",
-                Role.code == "approver",
-            )
-            .limit(1)
-        )
+    approver_user_id = _resolve_approver(db, principal.tenant_id, employee)
 
     now = datetime.now(UTC)
     item = LeaveRequest(

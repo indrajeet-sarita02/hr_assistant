@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import DbSession, require_permission
+from app.api.deps import DbSession, require_permission, write_rate_limit
 from app.api.pagination import count_rows
 from app.api.v1.schemas.common import ORMModel, Page
 from app.core.errors import AppError, conflict, forbidden, invalid_state, not_found
@@ -373,13 +373,27 @@ def submit_attempt(
     idempotency_key: IdempotencyHeader,
     db: DbSession,
     principal: Principal = Depends(require_permission("assessment.attempt_own")),
+    _: None = Depends(write_rate_limit),
 ) -> SubmitOut:
+    # The idempotency payload covers the submitted answers snapshot so a
+    # second submission under the same key with different answers is a
+    # conflict rather than a silent replay (the same contract as leave and
+    # service-request submission, app/api/v1/leave.py). Answers are autosaved
+    # server-side, so the hash reflects the actual submitted state.
+    answers_snapshot = [
+        {"question_id": str(row.question_id), "answer": row.answer}
+        for row in db.scalars(
+            select(AttemptAnswer)
+            .where(AttemptAnswer.attempt_id == attempt_id)
+            .order_by(AttemptAnswer.question_id)
+        )
+    ]
     state = begin(
         db,
         principal,
         "POST /api/v1/mock-test-attempts/submit",
         idempotency_key,
-        {"attempt_id": str(attempt_id)},
+        {"attempt_id": str(attempt_id), "answers": answers_snapshot},
     )
     if state.replay:
         response.status_code = state.record.response_status or 200

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from sqlalchemy import select
+
+from app.db.models import Candidate, CandidateConsent, PrivacyNoticeVersion
+
 
 def _requisition(client, recruiter, approver) -> dict:
     created = client.post(
@@ -32,6 +36,37 @@ def _requisition(client, recruiter, approver) -> dict:
     )
     assert opened.status_code == 200, opened.text
     return opened.json()
+
+
+def test_application_records_default_privacy_notice(client, login, db):
+    recruiter = login("recruiter@example.com")
+    approver = login("approver@example.com")
+    requisition = _requisition(client, recruiter, approver)
+    applied = client.post(
+        "/api/v1/recruitment/applications",
+        headers=recruiter,
+        json={
+            "requisition_id": requisition["id"],
+            "full_name": "Notice Candidate",
+            "email": "notice.candidate@example.com",
+        },
+    )
+    assert applied.status_code == 201, applied.text
+
+    notice = db.scalar(
+        select(PrivacyNoticeVersion).where(
+            PrivacyNoticeVersion.code == "candidate_privacy"
+        )
+    )
+    candidate = db.scalar(
+        select(Candidate).where(Candidate.email == "notice.candidate@example.com")
+    )
+    consent = db.scalar(
+        select(CandidateConsent).where(CandidateConsent.candidate_id == candidate.id)
+    )
+    assert notice is not None
+    assert consent is not None
+    assert consent.notice_version_id == notice.id
 
 
 def test_recruitment_stage_transitions_are_enforced(client, login):

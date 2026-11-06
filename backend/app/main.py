@@ -29,7 +29,14 @@ from app.core.errors import (
     validation_error_handler,
 )
 from app.core.i18n import negotiate_locale
-from app.core.logging import configure_logging, get_logger, request_id_ctx
+from app.core.logging import (
+    configure_logging,
+    get_logger,
+    ip_hash_ctx,
+    request_id_ctx,
+    user_agent_hash_ctx,
+)
+from app.core.security import privacy_hash
 from app.db.session import SessionLocal
 
 configure_logging(settings.debug)
@@ -93,6 +100,10 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             else uuid.uuid4().hex
         )
         token = request_id_ctx.set(request_id)
+        ip_hash_ctx.set(
+            privacy_hash(request.client.host if request.client else None)
+        )
+        user_agent_hash_ctx.set(privacy_hash(request.headers.get("user-agent")))
         # Authenticated dependencies refine this value with the user's stored
         # preference and the tenant default. Anonymous API responses still
         # honour Accept-Language.

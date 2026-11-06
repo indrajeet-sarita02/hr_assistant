@@ -411,7 +411,15 @@ def review_content(
     item = _load(db, content_id)
     if item.status != "in_review":
         raise invalid_state("Only content in review can be reviewed.")
-    if item.created_by == principal.user_id:
+    # Submission increments the content version without creating a snapshot,
+    # so inspect the latest saved draft version rather than requiring equality.
+    last_editor = db.scalar(
+        select(ContentVersion.created_by)
+        .where(ContentVersion.content_id == item.id)
+        .order_by(ContentVersion.version.desc())
+        .limit(1)
+    )
+    if principal.user_id in {item.created_by, last_editor}:
         raise forbidden("Content authors cannot review their own submission.")
     review = ContentReview(
         content_id=item.id,
@@ -460,17 +468,21 @@ def publish_content(
             "content.errors.expired",
             "Expired content cannot be published.",
         )
-    approval = db.scalar(
-        select(ContentReview.id)
-        .where(
-            ContentReview.content_id == item.id,
-            ContentReview.decision == "approved",
-        )
+    latest_review = db.scalar(
+        select(ContentReview)
+        .where(ContentReview.content_id == item.id)
         .order_by(ContentReview.created_at.desc())
         .limit(1)
     )
-    if approval is None:
-        raise invalid_state("Content requires an approved review before publishing.")
+    # The review records the version it inspected; publishing increments the
+    # content version, so the approved review must cover ``version - 1``. This
+    # prevents an older approval from authorising a newer revision.
+    if (
+        latest_review is None
+        or latest_review.decision != "approved"
+        or latest_review.content_version != item.version - 1
+    ):
+        raise invalid_state("Content requires an approved review of the current version.")
     item.status = "published"
     item.published_at = datetime.now(UTC)
     item.version += 1

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, EmailStr, Field
@@ -17,6 +17,7 @@ from app.core.security import hash_password
 from app.db.models import (
     AuditEvent,
     ContentReport,
+    EmployeeProfile,
     LeaveType,
     MembershipRole,
     Organization,
@@ -160,6 +161,30 @@ class ContentReportPatch(BaseModel):
     resolution: str | None = Field(default=None, max_length=2000)
 
 
+def _ensure_employee_profile(
+    db: Session, tenant_id: uuid.UUID, user: User
+) -> EmployeeProfile:
+    """Every internal member needs a profile for leave and onboarding flows."""
+
+    employee = db.scalar(
+        select(EmployeeProfile).where(
+            EmployeeProfile.tenant_id == tenant_id,
+            EmployeeProfile.user_id == user.id,
+        )
+    )
+    if employee is None:
+        employee = EmployeeProfile(
+            tenant_id=tenant_id,
+            user_id=user.id,
+            employee_number=f"EMP-{user.id.hex[:8].upper()}",
+            join_date=date.today(),
+            status="active",
+        )
+        db.add(employee)
+        db.flush()
+    return employee
+
+
 def _role_permissions(db: Session, role_id: uuid.UUID) -> frozenset[str]:
     return frozenset(
         db.scalars(
@@ -288,6 +313,7 @@ def add_membership(
     )
     db.add(membership)
     db.flush()
+    _ensure_employee_profile(db, principal.tenant_id, user)
     for role in roles:
         db.add(MembershipRole(membership_id=membership.id, role_id=role.id, scope={}))
     write_audit(

@@ -146,6 +146,14 @@ def refresh(payload: RefreshIn, request: Request, db: DbSession) -> TokenOut:
     write_audit(
         db,
         None,
+        "session.revoked",
+        target_type="session",
+        target_id=old_session.id,
+        metadata={"reason": "refresh_rotation", "user_id": str(user.id)},
+    )
+    write_audit(
+        db,
+        None,
         "auth.session.refreshed",
         target_type="user",
         target_id=user.id,
@@ -162,6 +170,13 @@ def logout(
     payload: LogoutIn | None = None,
 ) -> MessageOut:
     revoke_session(db, principal.session)
+    write_audit(
+        db,
+        principal,
+        "session.revoked",
+        target_type="session",
+        target_id=principal.session.id,
+    )
     write_audit(
         db,
         principal,

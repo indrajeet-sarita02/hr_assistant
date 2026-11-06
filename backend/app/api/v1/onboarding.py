@@ -8,17 +8,24 @@ from fastapi import APIRouter, Depends, Header, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 
-from app.api.deps import DbSession, get_principal, require_internal_permission
+from app.api.deps import (
+    DbSession,
+    get_principal,
+    require_internal_permission,
+    write_rate_limit,
+)
 from app.api.pagination import count_rows
 from app.api.v1.schemas.common import ORMModel, Page
 from app.core.errors import AppError, conflict, forbidden, invalid_state, not_found
 from app.db.models import (
     Document,
     EmployeeProfile,
+    MembershipRole,
     OnboardingCase,
     OnboardingTask,
     OnboardingTemplate,
     OnboardingTemplateTask,
+    TenantMembership,
 )
 from app.domains.audit import write_audit, write_outbox
 from app.domains.idempotency import begin, complete
@@ -42,6 +49,7 @@ class TemplateTaskIn(BaseModel):
     owner_rule: str = "employee"
     due_offset_days: int = Field(default=0, ge=0, le=365)
     required_evidence: bool = False
+    applicability: dict = Field(default_factory=dict)
     position: int = Field(ge=1)
 
 
@@ -63,6 +71,7 @@ class TemplateTaskOut(ORMModel):
     owner_rule: str
     due_offset_days: int
     required_evidence: bool
+    applicability: dict
     position: int
 
 
@@ -115,6 +124,94 @@ class TaskUpdate(BaseModel):
 
 class EvidenceIn(BaseModel):
     document_id: uuid.UUID
+
+
+_APPLICABILITY_KEYS = {
+    "department_ids",
+    "role_ids",
+    "job_titles",
+    "start_date_from",
+    "start_date_to",
+}
+
+
+def _normalise_applicability(raw: dict) -> dict:
+    unknown = set(raw) - _APPLICABILITY_KEYS
+    if unknown:
+        raise AppError(
+            422,
+            "validation_error",
+            "errors.validation",
+            f"Unknown applicability keys: {', '.join(sorted(unknown))}.",
+        )
+    result: dict = {}
+    for key in ("department_ids", "role_ids"):
+        values = raw.get(key) or []
+        if not isinstance(values, list):
+            raise AppError(
+                422, "validation_error", "errors.validation", f"{key} must be a list."
+            )
+        parsed = []
+        for value in values:
+            try:
+                parsed.append(str(uuid.UUID(str(value))))
+            except (TypeError, ValueError) as exc:
+                raise AppError(
+                    422,
+                    "validation_error",
+                    "errors.validation",
+                    f"{key} must contain UUIDs.",
+                ) from exc
+        if parsed:
+            result[key] = parsed
+    titles = raw.get("job_titles") or []
+    if not isinstance(titles, list) or any(not isinstance(item, str) for item in titles):
+        raise AppError(
+            422, "validation_error", "errors.validation", "job_titles must be a list of strings."
+        )
+    if titles:
+        result["job_titles"] = [item.strip() for item in titles if item.strip()]
+    for key in ("start_date_from", "start_date_to"):
+        value = raw.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            result[key] = date.fromisoformat(str(value)).isoformat()
+        except ValueError as exc:
+            raise AppError(
+                422,
+                "validation_error",
+                "errors.validation",
+                f"{key} must be an ISO date.",
+            ) from exc
+    return result
+
+
+def _task_applies(
+    task: OnboardingTemplateTask,
+    employee: EmployeeProfile,
+    role_ids: set[str],
+    start_date: date,
+) -> bool:
+    rules = task.applicability or {}
+    department_ids = set(rules.get("department_ids") or [])
+    if department_ids and str(employee.department_id) not in department_ids:
+        return False
+    required_roles = set(rules.get("role_ids") or [])
+    if required_roles and not required_roles.intersection(role_ids):
+        return False
+    job_titles = set(rules.get("job_titles") or [])
+    if job_titles and (employee.job_title or "") not in job_titles:
+        return False
+    if rules.get("start_date_from") and start_date < date.fromisoformat(
+        rules["start_date_from"]
+    ):
+        return False
+    if rules.get("start_date_to") and start_date > date.fromisoformat(
+        rules["start_date_to"]
+    ):
+        return False
+    return True
 
 
 @router.get("/templates", response_model=list[TemplateOut])
@@ -172,6 +269,7 @@ def create_template(
             owner_rule=task_payload.owner_rule,
             due_offset_days=task_payload.due_offset_days,
             required_evidence=task_payload.required_evidence,
+            applicability=_normalise_applicability(task_payload.applicability),
             position=task_payload.position,
         )
         db.add(task)
@@ -273,6 +371,7 @@ def update_template(
                     owner_rule=task_payload.owner_rule,
                     due_offset_days=task_payload.due_offset_days,
                     required_evidence=task_payload.required_evidence,
+                    applicability=_normalise_applicability(task_payload.applicability),
                     position=task_payload.position,
                 )
             )
@@ -373,6 +472,7 @@ def create_case(
     idempotency_key: IdempotencyHeader,
     db: DbSession,
     principal: Principal = Depends(require_internal_permission("onboarding.case.create")),
+    _: None = Depends(write_rate_limit),
 ) -> CaseOut:
     state = begin(
         db,
@@ -427,6 +527,26 @@ def create_case(
             .order_by(OnboardingTemplateTask.position)
         )
     )
+    role_ids = {
+        str(role_id)
+        for role_id in db.scalars(
+            select(MembershipRole.role_id)
+            .join(
+                TenantMembership,
+                TenantMembership.id == MembershipRole.membership_id,
+            )
+            .where(
+                TenantMembership.tenant_id == principal.tenant_id,
+                TenantMembership.user_id == employee.user_id,
+                TenantMembership.status == "active",
+            )
+        )
+    }
+    template_tasks = [
+        task
+        for task in template_tasks
+        if _task_applies(task, employee, role_ids, payload.start_date)
+    ]
     manager_user_id = None
     if employee.manager_employee_id:
         manager = db.get(EmployeeProfile, employee.manager_employee_id)
@@ -617,6 +737,8 @@ def update_task(
         and "onboarding.case.create" not in principal.permissions
     ):
         raise forbidden("Only the assigned owner can update this task.")
+    # Track whether this mutation completes the task for the §8.14 audit.
+    completion_status: str | None = None
     if payload.status is not None:
         if payload.status not in TASK_TRANSITIONS:
             raise AppError(422, "validation_error", "errors.validation", "Invalid status.")
@@ -638,6 +760,7 @@ def update_task(
         task.status = payload.status
         if payload.status == "completed":
             task.completed_at = datetime.now(UTC)
+            completion_status = "completed"
     if payload.evidence_document_id is not None:
         document = db.scalar(
             select(Document).where(
@@ -647,7 +770,16 @@ def update_task(
         )
         if document is None:
             raise not_found("document")
-        if document.scan_status in {"infected", "failed"}:
+        if document.scan_status != "clean":
+            # Never attach unscanned or quarantined files (§10.3: never serve
+            # unscanned files), even before they reach a download path.
+            if document.scan_status == "pending":
+                raise AppError(
+                    422,
+                    "business_rule_violation",
+                    "documents.errors.scan_pending",
+                    "This document is not available until security scanning completes.",
+                )
             raise AppError(
                 422,
                 "business_rule_violation",
@@ -670,6 +802,17 @@ def update_task(
         target_id=task.id,
         metadata={"status": task.status},
     )
+    if completion_status == "completed":
+        # §8.14 catalogue: onboarding.task.completed, alongside the generic
+        # task.updated event above, so completion is independently queryable.
+        write_audit(
+            db,
+            principal,
+            "onboarding.task.completed",
+            target_type="onboarding_task",
+            target_id=task.id,
+            metadata={"completed_at": task.completed_at.isoformat()},
+        )
     db.commit()
     return TaskOut.model_validate(task)
 

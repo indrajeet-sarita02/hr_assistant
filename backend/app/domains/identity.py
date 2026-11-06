@@ -27,7 +27,6 @@ PUBLIC_PERMISSIONS = frozenset(
         "resume.manage_own",
         "content_report.create",
         "notification.read_own",
-        "hr_assistant.feedback",
     }
 )
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+from tests.factories import add_role_to_existing_member
+
 
 def _content_payload(slug: str = "editorial-test") -> dict:
     return {
@@ -175,3 +177,33 @@ def test_content_report_detail_requires_triage_permission(client, login):
         headers=employee,
     )
     assert forbidden.status_code == 403
+
+
+def test_last_editor_cannot_review_the_submission(client, login):
+    content = login("content@example.com")
+    add_role_to_existing_member("reviewer@example.com", "content_editor")
+    reviewer = login("reviewer@example.com")
+    created = client.post(
+        "/api/v1/admin/content", headers=content, json=_content_payload("editor-self-review")
+    )
+    assert created.status_code == 201, created.text
+    content_id = created.json()["id"]
+
+    edited = client.patch(
+        f"/api/v1/admin/content/{content_id}",
+        headers=reviewer,
+        json=_content_payload("editor-self-review"),
+    )
+    assert edited.status_code == 200, edited.text
+    submitted = client.post(
+        f"/api/v1/admin/content/{content_id}/submit-review", headers=reviewer
+    )
+    assert submitted.status_code == 200, submitted.text
+
+    self_review = client.post(
+        f"/api/v1/admin/content/{content_id}/review",
+        headers=reviewer,
+        json={"decision": "approved"},
+    )
+    assert self_review.status_code == 403
+    assert "own submission" in self_review.json()["error"]["message"]
